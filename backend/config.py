@@ -35,17 +35,30 @@ class Settings:
     PROJECT_NAME: str = "MPLADS AI Sentinel"
     VERSION: str = "1.0.0"
     API_V1_STR: str = "/api"
-    
-    # Database URL: PostgreSQL supported; defaults to local SQLite file for development
-    DATABASE_URL: str = os.getenv(
-        "DATABASE_URL", 
-        f"sqlite:///{BASE_DIR / 'mplads_sentinel.db'}"
-    )
-    
+
+    # MongoDB: the only persistence layer (Vercel serverless has no usable
+    # local disk, so SQLite is gone). MPLADS_DB_NAME lets tests point at a
+    # throwaway database on the same cluster.
+    MONGODB_URI: str = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+    MONGO_DB_NAME: str = os.getenv("MONGO_DB_NAME", "mplads_sentinel")
+
     DATA_DIR: Path = BASE_DIR / "data"
     MODEL_DIR: Path = BASE_DIR / "model"
     # Bundled long-format sample feed, used only by tests / offline replays
     RAW_SAMPLE_PATH: Path = BASE_DIR / "data" / "mplads_raw_sample.csv"
+
+    # Serverless platforms freeze the process between requests, so the
+    # in-process scheduler and the startup live-sync thread must not run.
+    IS_SERVERLESS: bool = os.getenv("VERCEL") == "1" or os.getenv("IS_SERVERLESS") == "1"
+
+    # When empty and SEED_FROM_SAMPLE=1, first boot ingests the bundled
+    # sample CSV synchronously so a fresh deployment shows data immediately;
+    # scheduled live syncs then replace it with real portal data.
+    SEED_FROM_SAMPLE: bool = os.getenv("SEED_FROM_SAMPLE", "").lower() in {"1", "true", "yes"}
+
+    # Vercel Cron authenticates with `Authorization: Bearer $CRON_SECRET`
+    # (the env var of this exact name). Also accepted as X-Cron-Secret.
+    CRON_SECRET: str = os.getenv("CRON_SECRET", "")
     
     CORS_ORIGINS: list[str] = _cors_origins()
     

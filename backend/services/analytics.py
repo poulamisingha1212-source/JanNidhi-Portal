@@ -3,17 +3,20 @@ Aggregate analytics queries shared by the REST endpoints.
 
 Every transparency-facing aggregation (MP directory, MP profile, state
 directory/profile, category & status analytics, CSV export) lives here so the
-route handlers in backend/main.py stay thin and the SQL is testable.
+route handlers in backend/main.py stay thin and the query logic is testable.
+
+All queries target MongoDB: filters are plain dicts, aggregations are
+pipelines. Output shapes match the previous SQL implementation exactly.
 """
 import ast
 import csv
 import io
+import re
 from typing import Optional, Generator
 
-from sqlalchemy import func, case, desc, asc, distinct
-from sqlalchemy.orm import Query, Session
+from pymongo import ASCENDING, DESCENDING
 
-from backend.models import Work, ReviewLog, MPAllocation
+from backend.database import works, mp_allocations, review_logs
 
 HIGH_RISK_TIER = "High Risk - Review"
 MEDIUM_RISK_TIER = "Medium Risk - Monitor"
@@ -33,27 +36,79 @@ DIRECTORY_SORTABLE_FIELDS = {
     "avg_utilization", "avg_risk_score", "high_risk_count", "mp_count",
 }
 
+# Directory sort key -> grouped-document field produced by _group_works()
+_DIRECTORY_SORT_KEY = {
+    "name": "_id",
+    "works_count": "count",
+    "total_sanctioned": "total_sanctioned",
+    "total_disbursed": "total_disbursed",
+    "avg_utilization": "avg_utilization",
+    "avg_risk_score": "avg_risk_score",
+    "high_risk_count": "high_risk_count",
+}
+
 
 # ------------------------------------------------------------------------------
 # Shared expressions & helpers
 # ------------------------------------------------------------------------------
 
-def high_risk_expr():
-    return func.sum(case((Work.risk_tier == HIGH_RISK_TIER, 1), else_=0))
+def _ci(value: str) -> dict:
+    """Case-insensitive 'contains' matcher mirroring SQL ilike '%value%'."""
+    return {"$regex": re.escape(value.strip()), "$options": "i"}
 
 
-def medium_risk_expr():
-    return func.sum(case((Work.risk_tier == MEDIUM_RISK_TIER, 1), else_=0))
+def _group_works(group_key: Optional[str], with_extremes: bool = False,
+                 include_house: bool = False) -> dict:
+    """$group stage computing the standard per-entity aggregates."""
+    stage: dict = {
+        "_id": None if group_key is None else f"${group_key}",
+        "count": {"$sum": 1},
+        "total_sanctioned": {"$sum": {"$ifNull": ["$sanction_amount", 0.0]}},
+        "total_disbursed": {"$sum": {"$ifNull": ["$total_fund_disbursed", 0.0]}},
+        "avg_utilization": {"$avg": {"$ifNull": ["$utilization_ratio", 0.0]}},
+        "avg_risk_score": {"$avg": {"$ifNull": ["$final_risk_score", 0.0]}},
+        "max_risk_score": {"$max": {"$ifNull": ["$final_risk_score", 0.0]}},
+        "high_risk_count": {"$sum": {"$cond": [{"$eq": ["$risk_tier", HIGH_RISK_TIER]}, 1, 0]}},
+        "medium_risk_count": {"$sum": {"$cond": [{"$eq": ["$risk_tier", MEDIUM_RISK_TIER]}, 1, 0]}},
+        # $gt None matches present, non-null values (missing fields compare as null)
+        "reviewed_count": {"$sum": {"$cond": [{"$gt": ["$human_review_outcome", None]}, 1, 0]}},
+    }
+    if with_extremes:
+        stage["constituency"] = {"$max": "$constituency"}
+        stage["state"] = {"$max": "$state"}
+    if include_house:
+        stage["house"] = {"$max": "$house"}
+    return stage
 
 
-def reviewed_expr():
-    return func.sum(case((Work.human_review_outcome.isnot(None), 1), else_=0))
+def _count_groups(group_key: str, match: dict) -> int:
+    """Number of distinct groups for a match, without materializing them."""
+    res = list(works.aggregate([
+        {"$match": match},
+        {"$group": {"_id": f"${group_key}"}},
+        {"$count": "n"},
+    ]))
+    return int(res[0]["n"]) if res else 0
 
 
-def parse_rule_flags(raw: Optional[str]) -> list:
-    """Deserialize the rule_flags_triggered column into a clean list."""
+def _allocations_by_mp(house: Optional[str] = None) -> dict:
+    """Per-MP allocated totals from the mp_allocations ledger."""
+    match = {"house": house.strip()} if house else {}
+    rows = mp_allocations.aggregate([
+        {"$match": match},
+        {"$group": {"_id": "$mp_name",
+                    "allocated": {"$sum": {"$ifNull": ["$allocated_amount", 0.0]}}}},
+    ])
+    return {r["_id"]: float(r["allocated"] or 0) for r in rows}
+
+
+def parse_rule_flags(raw) -> list:
+    """Deserialize rule_flags_triggered into a clean list (stored as a list in
+    Mongo; the string path keeps legacy CSV round-trips working)."""
     if not raw:
         return []
+    if isinstance(raw, (list, tuple)):
+        return [str(f) for f in raw]
     try:
         parsed = ast.literal_eval(raw)
         return [str(f) for f in parsed] if isinstance(parsed, (list, tuple)) else []
@@ -61,42 +116,40 @@ def parse_rule_flags(raw: Optional[str]) -> list:
         return [f.strip() for f in raw.strip("[]").replace("'", "").split(",") if f.strip()]
 
 
-def work_to_list_item(w: Work) -> dict:
-    """Serialize a Work ORM row into the WorkListItem payload shape."""
-    flags = parse_rule_flags(w.rule_flags_triggered)
+def work_to_list_item(w: dict) -> dict:
+    """Serialize a works document into the WorkListItem payload shape."""
     return {
-        "work_id": w.work_id,
-        "mp_name": w.mp_name,
-        "state": w.state,
-        "constituency": w.constituency,
-        "ida": w.ida,
-        "primary_vendor": w.primary_vendor,
-        "work_category": w.work_category,
-        "work_type": w.work_type,
-        "sanction_amount": w.sanction_amount,
-        "total_fund_disbursed": w.total_fund_disbursed,
-        "utilization_ratio": w.utilization_ratio,
-        "work_status": w.work_status,
-        "completion_date": w.completion_date,
-        "final_risk_score": w.final_risk_score,
-        "priority_rank": w.priority_rank,
-        "risk_tier": w.risk_tier,
-        "recommended_action": w.recommended_action,
-        "rule_flag_count": w.rule_flag_count,
-        "rule_flags_triggered": flags,
-        "human_review_outcome": w.human_review_outcome,
+        "work_id": w.get("work_id"),
+        "mp_name": w.get("mp_name"),
+        "state": w.get("state"),
+        "constituency": w.get("constituency"),
+        "ida": w.get("ida"),
+        "primary_vendor": w.get("primary_vendor"),
+        "work_category": w.get("work_category"),
+        "work_type": w.get("work_type"),
+        "sanction_amount": w.get("sanction_amount") or 0.0,
+        "total_fund_disbursed": w.get("total_fund_disbursed") or 0.0,
+        "utilization_ratio": w.get("utilization_ratio") or 0.0,
+        "work_status": w.get("work_status"),
+        "completion_date": w.get("completion_date"),
+        "final_risk_score": w.get("final_risk_score") or 0.0,
+        "priority_rank": int(w.get("priority_rank") or 0),
+        "risk_tier": w.get("risk_tier") or LOW_RISK_TIER,
+        "recommended_action": w.get("recommended_action"),
+        "rule_flag_count": int(w.get("rule_flag_count") or 0),
+        "rule_flags_triggered": parse_rule_flags(w.get("rule_flags_triggered")),
+        "human_review_outcome": w.get("human_review_outcome"),
     }
 
 
-def apply_house(query: Query, house: Optional[str]) -> Query:
-    """Constrain a query to a single house when one is selected."""
+def apply_house(filt: dict, house: Optional[str]) -> dict:
+    """Constrain a filter dict to a single house when one is selected."""
     if house:
-        query = query.filter(Work.house == house.strip())
-    return query
+        filt["house"] = house.strip()
+    return filt
 
 
 def apply_work_filters(
-    query: Query,
     state: Optional[str] = None,
     mp_name: Optional[str] = None,
     house: Optional[str] = None,
@@ -105,36 +158,27 @@ def apply_work_filters(
     work_category: Optional[str] = None,
     work_status: Optional[str] = None,
     search: Optional[str] = None,
-) -> Query:
-    """Apply the standard works-list filters consistently across list & export."""
+) -> dict:
+    """Build the standard works-list filter dict, shared by list & export."""
+    filt: dict = {}
     if state:
-        query = query.filter(Work.state.ilike(f"%{state.strip()}%"))
+        filt["state"] = _ci(state)
     if mp_name:
-        query = query.filter(Work.mp_name.ilike(f"%{mp_name.strip()}%"))
+        filt["mp_name"] = _ci(mp_name)
     if house:
-        query = query.filter(Work.house == house.strip())
+        filt["house"] = house.strip()
     if ida:
-        query = query.filter(Work.ida.ilike(f"%{ida.strip()}%"))
+        filt["ida"] = _ci(ida)
     if risk_tier:
-        query = query.filter(Work.risk_tier == risk_tier.strip())
+        filt["risk_tier"] = risk_tier.strip()
     if work_category:
-        query = query.filter(Work.work_category == work_category.strip())
+        filt["work_category"] = work_category.strip()
     if work_status:
-        query = query.filter(Work.work_status == work_status.strip())
+        filt["work_status"] = work_status.strip()
     if search:
-        s = f"%{search.strip()}%"
-        query = query.filter(
-            (Work.work_id.ilike(s))
-            | (Work.primary_vendor.ilike(s))
-            | (Work.work_type.ilike(s))
-        )
-    return query
-
-
-def apply_directory_sort(query: Query, expr_map: dict, sort_by: str, order: str) -> Query:
-    """Order a grouped directory query by a whitelisted aggregate expression."""
-    sort_expr = expr_map.get(sort_by, expr_map["total_sanctioned"])
-    return query.order_by(desc(sort_expr) if order.lower() == "desc" else asc(sort_expr))
+        s = _ci(search)
+        filt["$or"] = [{"work_id": s}, {"primary_vendor": s}, {"work_type": s}]
+    return filt
 
 
 # ------------------------------------------------------------------------------
@@ -142,7 +186,7 @@ def apply_directory_sort(query: Query, expr_map: dict, sort_by: str, order: str)
 # ------------------------------------------------------------------------------
 
 def get_mp_directory(
-    db: Session,
+    db,
     page: int = 1,
     page_size: int = 20,
     search: Optional[str] = None,
@@ -152,77 +196,46 @@ def get_mp_directory(
     order: str = "desc",
 ) -> dict:
     """Paginated MP-wise fund & risk aggregation for the public MP directory."""
-    select_cols = [
-        Work.mp_name.label("name"),
-        func.max(Work.constituency).label("constituency"),
-        func.max(Work.state).label("state"),
-        func.count(Work.work_id).label("works_count"),
-        func.coalesce(func.sum(Work.sanction_amount), 0.0).label("total_sanctioned"),
-        func.coalesce(func.sum(Work.total_fund_disbursed), 0.0).label("total_disbursed"),
-        func.coalesce(func.avg(Work.utilization_ratio), 0.0).label("avg_utilization"),
-        func.coalesce(func.avg(Work.final_risk_score), 0.0).label("avg_risk_score"),
-        func.coalesce(func.max(Work.final_risk_score), 0.0).label("max_risk_score"),
-        func.coalesce(high_risk_expr(), 0).label("high_risk_count"),
-        func.coalesce(medium_risk_expr(), 0).label("medium_risk_count"),
-        func.coalesce(reviewed_expr(), 0).label("reviewed_count"),
-    ]
-    alloc_q = db.query(
-        MPAllocation.mp_name.label("amp"),
-        func.sum(MPAllocation.allocated_amount).label("allocated"),
-    )
-    if house:
-        alloc_q = alloc_q.filter(MPAllocation.house == house.strip())
-    alloc_sq = alloc_q.group_by(MPAllocation.mp_name).subquery()
-
-    query = db.query(*select_cols,
-                     func.coalesce(alloc_sq.c.allocated, 0.0).label("allocated_amount")
-                     ).outerjoin(alloc_sq, alloc_sq.c.amp == Work.mp_name).filter(
-        Work.mp_name.isnot(None), Work.mp_name != ""
-    ).group_by(Work.mp_name)
-
+    match: dict = {"mp_name": {"$nin": [None, ""]}}
     if state:
-        query = query.filter(Work.state.ilike(f"%{state.strip()}%"))
+        match["state"] = _ci(state)
     if house:
-        query = query.filter(Work.house == house.strip())
+        match["house"] = house.strip()
     if search:
-        s = f"%{search.strip()}%"
-        query = query.filter(
-            (Work.mp_name.ilike(s))
-            | (Work.constituency.ilike(s))
-        )
+        match["$or"] = [{"mp_name": _ci(search)}, {"constituency": _ci(search)}]
 
-    total = query.count()
-    query = apply_directory_sort(query, {
-        "name": Work.mp_name,
-        "works_count": func.count(Work.work_id),
-        "total_sanctioned": func.sum(Work.sanction_amount),
-        "total_disbursed": func.sum(Work.total_fund_disbursed),
-        "avg_utilization": func.avg(Work.utilization_ratio),
-        "avg_risk_score": func.avg(Work.final_risk_score),
-        "high_risk_count": high_risk_expr(),
-    }, sort_by, order)
+    total = _count_groups("mp_name", match)
+    sort_field = _DIRECTORY_SORT_KEY.get(sort_by, "total_sanctioned")
+    direction = DESCENDING if order.lower() == "desc" else ASCENDING
 
-    offset = (page - 1) * page_size
-    rows = query.offset(offset).limit(page_size).all()
+    rows = list(works.aggregate([
+        {"$match": match},
+        {"$group": _group_works("mp_name", with_extremes=True)},
+        {"$sort": {sort_field: direction, "_id": ASCENDING}},
+        {"$skip": (page - 1) * page_size},
+        {"$limit": page_size},
+    ]))
 
+    alloc_map = _allocations_by_mp(house)
     items = []
-    for rank, r in enumerate(rows, start=offset + 1):
+    for rank, r in enumerate(rows, start=(page - 1) * page_size + 1):
+        allocated = alloc_map.get(r["_id"], 0.0)
         items.append({
             "rank": rank,
-            "mp_name": r.name,
-            "constituency": r.constituency,
-            "state": r.state,
-            "works_count": int(r.works_count or 0),
-            "total_sanctioned": round(float(r.total_sanctioned or 0), 2),
-            "total_disbursed": round(float(r.total_disbursed or 0), 2),
-            "avg_utilization": round(float(r.avg_utilization or 0), 4),
-            "avg_risk_score": round(float(r.avg_risk_score or 0), 1),
-            "max_risk_score": round(float(r.max_risk_score or 0), 1),
-            "high_risk_count": int(r.high_risk_count or 0),
-            "medium_risk_count": int(r.medium_risk_count or 0),
-            "reviewed_count": int(r.reviewed_count or 0),
-            "allocated_amount": round(float(getattr(r, "allocated_amount", 0) or 0), 2),
-            "total_allocated": round(float(getattr(r, "allocated_amount", 0) or 0), 2),
+            "mp_name": r["_id"],
+            "constituency": r.get("constituency"),
+            "state": r.get("state"),
+            "works_count": int(r["count"] or 0),
+            "total_sanctioned": round(float(r["total_sanctioned"] or 0), 2),
+            "total_disbursed": round(float(r["total_disbursed"] or 0), 2),
+            "avg_utilization": round(float(r["avg_utilization"] or 0), 4),
+            "avg_risk_score": round(float(r["avg_risk_score"] or 0), 1),
+            "max_risk_score": round(float(r["max_risk_score"] or 0), 1),
+            "high_risk_count": int(r["high_risk_count"] or 0),
+            "medium_risk_count": int(r["medium_risk_count"] or 0),
+            "reviewed_count": int(r["reviewed_count"] or 0),
+            "allocated_amount": round(allocated, 2),
+            "total_allocated": round(allocated, 2),
         })
 
     total_pages = (total + page_size - 1) // page_size if total > 0 else 1
@@ -232,130 +245,111 @@ def get_mp_directory(
     }
 
 
-def get_mp_profile(db: Session, mp_name: str, house: Optional[str] = None) -> Optional[dict]:
+def get_mp_profile(db, mp_name: str, house: Optional[str] = None) -> Optional[dict]:
     """Full transparency dossier for one MP: funds, risk tiers, breakdowns, works."""
-    match = func.lower(Work.mp_name) == mp_name.strip().lower()
-    scoped_match = (match, Work.house == house.strip()) if house else (match,)
-
-    agg = db.query(
-        func.count(Work.work_id).label("works_count"),
-        func.coalesce(func.sum(Work.sanction_amount), 0.0).label("total_sanctioned"),
-        func.coalesce(func.sum(Work.total_fund_disbursed), 0.0).label("total_disbursed"),
-        func.coalesce(func.avg(Work.utilization_ratio), 0.0).label("avg_utilization"),
-        func.coalesce(func.avg(Work.final_risk_score), 0.0).label("avg_risk_score"),
-        func.coalesce(func.max(Work.final_risk_score), 0.0).label("max_risk_score"),
-        func.coalesce(high_risk_expr(), 0).label("high_risk_count"),
-        func.coalesce(medium_risk_expr(), 0).label("medium_risk_count"),
-        func.coalesce(reviewed_expr(), 0).label("reviewed_count"),
-        func.max(Work.constituency).label("constituency"),
-        func.max(Work.state).label("state"),
-        func.max(Work.house).label("house"),
-    ).filter(*scoped_match).first()
-
-    if not agg or int(agg.works_count or 0) == 0:
-        return None
-
-    # Fetch total allocated amount from mp_allocations table
-    allocation = db.query(
-        func.coalesce(func.sum(MPAllocation.allocated_amount), 0.0).label("total_allocated")
-    ).filter(func.lower(MPAllocation.mp_name) == mp_name.strip().lower())
+    match: dict = {"mp_name_lower": mp_name.strip().lower()}
     if house:
-        allocation = allocation.filter(MPAllocation.house == house.strip())
-    allocation = allocation.first()
+        match["house"] = house.strip()
+
+    agg_rows = list(works.aggregate([
+        {"$match": match},
+        {"$group": _group_works(None, with_extremes=True, include_house=True)},
+    ]))
+    if not agg_rows or int(agg_rows[0]["count"] or 0) == 0:
+        return None
+    agg = agg_rows[0]
 
     # The portal's allocated limit is an MP-level ledger value. It must never
     # fall back to the sum of work sanctions, which is a different source field.
-    total_allocated = round(float(allocation.total_allocated or 0), 2) if allocation else 0.0
+    alloc_match = {"mp_name_lower": mp_name.strip().lower()}
+    if house:
+        alloc_match["house"] = house.strip()
+    alloc_rows = list(mp_allocations.aggregate([
+        {"$match": alloc_match},
+        {"$group": {"_id": None,
+                    "total_allocated": {"$sum": {"$ifNull": ["$allocated_amount", 0.0]}}}},
+    ]))
+    total_allocated = round(float(alloc_rows[0]["total_allocated"] or 0), 2) if alloc_rows else 0.0
 
-    tier_rows = (
-        db.query(Work.risk_tier, func.count(Work.work_id))
-        .filter(*scoped_match).group_by(Work.risk_tier).all()
-    )
     tier_distribution = {HIGH_RISK_TIER: 0, MEDIUM_RISK_TIER: 0, LOW_RISK_TIER: 0}
-    for tier, cnt in tier_rows:
-        if tier in tier_distribution:
-            tier_distribution[tier] = int(cnt)
+    for row in works.aggregate([
+        {"$match": match},
+        {"$group": {"_id": "$risk_tier", "count": {"$sum": 1}}},
+    ]):
+        if row["_id"] in tier_distribution:
+            tier_distribution[row["_id"]] = int(row["count"])
 
-    def _breakdown(column, limit):
-        rows = (
-            db.query(
-                column.label("name"),
-                func.count(Work.work_id).label("count"),
-                func.coalesce(func.sum(Work.sanction_amount), 0.0).label("total_sanctioned"),
-                func.coalesce(func.sum(Work.total_fund_disbursed), 0.0).label("total_disbursed"),
-                func.coalesce(func.avg(Work.final_risk_score), 0.0).label("avg_risk_score"),
-                func.coalesce(high_risk_expr(), 0).label("high_risk_count"),
-            )
-            .filter(*scoped_match, column.isnot(None), column != "")
-            .group_by(column)
-            .order_by(desc(func.sum(Work.sanction_amount)))
-            .limit(limit)
-            .all()
-        )
+    def _breakdown(column: str, limit: int) -> list:
+        bmatch = {**match, column: {"$nin": [None, ""]}}
+        rows = works.aggregate([
+            {"$match": bmatch},
+            {"$group": {
+                "_id": f"${column}",
+                "count": {"$sum": 1},
+                "total_sanctioned": {"$sum": {"$ifNull": ["$sanction_amount", 0.0]}},
+                "total_disbursed": {"$sum": {"$ifNull": ["$total_fund_disbursed", 0.0]}},
+                "avg_risk_score": {"$avg": {"$ifNull": ["$final_risk_score", 0.0]}},
+                "high_risk_count": {"$sum": {"$cond": [{"$eq": ["$risk_tier", HIGH_RISK_TIER]}, 1, 0]}},
+            }},
+            {"$sort": {"total_sanctioned": DESCENDING}},
+            {"$limit": limit},
+        ])
         return [
             {
-                "name": r.name,
-                "count": int(r.count),
-                "total_sanctioned": round(float(r.total_sanctioned), 2),
-                "total_disbursed": round(float(r.total_disbursed), 2),
-                "avg_risk_score": round(float(r.avg_risk_score), 1),
-                "high_risk_count": int(r.high_risk_count),
+                "name": r["_id"],
+                "count": int(r["count"]),
+                "total_sanctioned": round(float(r["total_sanctioned"]), 2),
+                "total_disbursed": round(float(r["total_disbursed"]), 2),
+                "avg_risk_score": round(float(r["avg_risk_score"]), 1),
+                "high_risk_count": int(r["high_risk_count"]),
             }
             for r in rows
         ]
 
-    top_works = (
-        db.query(Work).filter(*scoped_match)
-        .order_by(desc(Work.final_risk_score), asc(Work.work_id))
-        .limit(10).all()
-    )
+    top_works = works.find(match).sort(
+        [("final_risk_score", DESCENDING), ("work_id", ASCENDING)]
+    ).limit(10)
 
-    recent_reviews = (
-        db.query(ReviewLog)
-        .join(Work, Work.work_id == ReviewLog.work_id)
-        .filter(*scoped_match)
-        .order_by(desc(ReviewLog.created_at))
-        .limit(10).all()
-    )
+    work_ids = works.distinct("work_id", match)
+    recent_reviews = review_logs.find({"work_id": {"$in": work_ids}}) \
+        .sort([("created_at", DESCENDING)]).limit(10)
 
-    # Count unique vendors for this MP
-    vendor_count = db.query(func.count(distinct(Work.primary_vendor))).filter(
-        *scoped_match, Work.primary_vendor.isnot(None), Work.primary_vendor != ""
-    ).scalar() or 0
+    vendor_match = {**match, "primary_vendor": {"$nin": [None, ""]}}
+    vendor_count = len(works.distinct("primary_vendor", vendor_match))
 
     return {
         "mp_name": mp_name.strip(),
-        "constituency": agg.constituency,
-        "state": agg.state,
-        "works_count": int(agg.works_count),
+        "constituency": agg.get("constituency"),
+        "state": agg.get("state"),
+        "works_count": int(agg["count"]),
         "total_allocated": total_allocated,
         "allocated_amount": total_allocated,
-        "total_sanctioned": round(float(agg.total_sanctioned), 2),
-        "sanction_amount": round(float(agg.total_sanctioned), 2),
-        "total_disbursed": round(float(agg.total_disbursed), 2),
-        "fund_disbursed_amount": round(float(agg.total_disbursed), 2),
-        "avg_utilization": round(float(agg.avg_utilization), 4),
-        "avg_risk_score": round(float(agg.avg_risk_score), 1),
-        "max_risk_score": round(float(agg.max_risk_score), 1),
-        "high_risk_count": int(agg.high_risk_count),
-        "medium_risk_count": int(agg.medium_risk_count),
+        "total_sanctioned": round(float(agg["total_sanctioned"]), 2),
+        "sanction_amount": round(float(agg["total_sanctioned"]), 2),
+        "total_disbursed": round(float(agg["total_disbursed"]), 2),
+        "fund_disbursed_amount": round(float(agg["total_disbursed"]), 2),
+        "avg_utilization": round(float(agg["avg_utilization"]), 4),
+        "avg_risk_score": round(float(agg["avg_risk_score"]), 1),
+        "max_risk_score": round(float(agg["max_risk_score"]), 1),
+        "high_risk_count": int(agg["high_risk_count"]),
+        "medium_risk_count": int(agg["medium_risk_count"]),
         "low_risk_count": tier_distribution[LOW_RISK_TIER],
-        "reviewed_count": int(agg.reviewed_count),
+        "reviewed_count": int(agg["reviewed_count"]),
         "vendor_count": int(vendor_count),
         "tier_distribution": tier_distribution,
-        "category_breakdown": _breakdown(Work.work_category, 12),
-        "status_breakdown": _breakdown(Work.work_status, 12),
-        "agency_breakdown": _breakdown(Work.ida, 8),
-        "top_vendors": _breakdown(Work.primary_vendor, 8),
+        "category_breakdown": _breakdown("work_category", 12),
+        "status_breakdown": _breakdown("work_status", 12),
+        "agency_breakdown": _breakdown("ida", 8),
+        "top_vendors": _breakdown("primary_vendor", 8),
         "top_risk_works": [work_to_list_item(w) for w in top_works],
         "recent_reviews": [
             {
-                "id": r.id,
-                "work_id": r.work_id,
-                "reviewer_name": r.reviewer_name,
-                "reviewer_role": r.reviewer_role,
-                "outcome": r.outcome,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "id": r.get("id"),
+                "work_id": r.get("work_id"),
+                "reviewer_name": r.get("reviewer_name"),
+                "reviewer_role": r.get("reviewer_role"),
+                "outcome": r.get("outcome"),
+                "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
             }
             for r in recent_reviews
         ],
@@ -367,7 +361,7 @@ def get_mp_profile(db: Session, mp_name: str, house: Optional[str] = None) -> Op
 # ------------------------------------------------------------------------------
 
 def get_state_directory(
-    db: Session,
+    db,
     house: Optional[str] = None,
     page: int = 1,
     page_size: int = 40,
@@ -375,51 +369,37 @@ def get_state_directory(
     order: str = "desc",
 ) -> dict:
     """State-wise aggregation: funds, MPs covered, risk concentration."""
-    select_cols = [
-        Work.state.label("name"),
-        func.count(distinct(Work.mp_name)).label("mp_count"),
-        func.count(Work.work_id).label("works_count"),
-        func.coalesce(func.sum(Work.sanction_amount), 0.0).label("total_sanctioned"),
-        func.coalesce(func.sum(Work.total_fund_disbursed), 0.0).label("total_disbursed"),
-        func.coalesce(func.avg(Work.utilization_ratio), 0.0).label("avg_utilization"),
-        func.coalesce(func.avg(Work.final_risk_score), 0.0).label("avg_risk_score"),
-        func.coalesce(high_risk_expr(), 0).label("high_risk_count"),
-        func.coalesce(medium_risk_expr(), 0).label("medium_risk_count"),
-        func.coalesce(reviewed_expr(), 0).label("reviewed_count"),
-    ]
-    query = db.query(*select_cols).filter(
-        Work.state.isnot(None), Work.state != ""
-    ).group_by(Work.state)
+    match: dict = {"state": {"$nin": [None, ""]}}
     if house:
-        query = query.filter(Work.house == house.strip())
-    total = query.count()
+        match["house"] = house.strip()
 
-    query = apply_directory_sort(query, {
-        "name": Work.state,
-        "mp_count": func.count(distinct(Work.mp_name)),
-        "works_count": func.count(Work.work_id),
-        "total_sanctioned": func.sum(Work.sanction_amount),
-        "total_disbursed": func.sum(Work.total_fund_disbursed),
-        "avg_utilization": func.avg(Work.utilization_ratio),
-        "avg_risk_score": func.avg(Work.final_risk_score),
-        "high_risk_count": high_risk_expr(),
-    }, sort_by, order)
+    total = _count_groups("state", match)
+    sort_field = _DIRECTORY_SORT_KEY.get(sort_by, "total_sanctioned")
+    direction = DESCENDING if order.lower() == "desc" else ASCENDING
 
-    rows = query.offset((page - 1) * page_size).limit(page_size).all()
+    rows = works.aggregate([
+        {"$match": match},
+        {"$group": {**_group_works("state"), "mp_set": {"$addToSet": "$mp_name"}}},
+        {"$set": {"mp_count": {"$size": {"$setDifference": ["$mp_set", [None, ""]]}}}},
+        {"$sort": {sort_field: direction, "_id": ASCENDING}},
+        {"$skip": (page - 1) * page_size},
+        {"$limit": page_size},
+    ])
+
     items = [
         {
             "rank": (page - 1) * page_size + idx,
-            "state": r.name,
-            "mp_count": int(r.mp_count or 0),
-            "works_count": int(r.works_count or 0),
-            "total_sanctioned": round(float(r.total_sanctioned or 0), 2),
-            "total_disbursed": round(float(r.total_disbursed or 0), 2),
-            "allocated_amount": round(float(getattr(r, "allocated_amount", 0) or 0), 2),
-            "avg_utilization": round(float(r.avg_utilization or 0), 4),
-            "avg_risk_score": round(float(r.avg_risk_score or 0), 1),
-            "high_risk_count": int(r.high_risk_count or 0),
-            "medium_risk_count": int(r.medium_risk_count or 0),
-            "reviewed_count": int(r.reviewed_count or 0),
+            "state": r["_id"],
+            "mp_count": int(r.get("mp_count") or 0),
+            "works_count": int(r["count"] or 0),
+            "total_sanctioned": round(float(r["total_sanctioned"] or 0), 2),
+            "total_disbursed": round(float(r["total_disbursed"] or 0), 2),
+            "allocated_amount": 0.0,
+            "avg_utilization": round(float(r["avg_utilization"] or 0), 4),
+            "avg_risk_score": round(float(r["avg_risk_score"] or 0), 1),
+            "high_risk_count": int(r["high_risk_count"] or 0),
+            "medium_risk_count": int(r["medium_risk_count"] or 0),
+            "reviewed_count": int(r["reviewed_count"] or 0),
         }
         for idx, r in enumerate(rows, start=1)
     ]
@@ -431,115 +411,94 @@ def get_state_directory(
     }
 
 
-def get_state_profile(db: Session, state: str) -> Optional[dict]:
+def get_state_profile(db, state: str) -> Optional[dict]:
     """State dossier: funds, tier spread, top MPs, agencies and categories."""
-    match = func.lower(Work.state) == state.strip().lower()
+    match: dict = {"state_lower": state.strip().lower()}
 
-    agg = db.query(
-        func.count(Work.work_id).label("works_count"),
-        func.count(distinct(Work.mp_name)).label("mp_count"),
-        func.coalesce(func.sum(Work.sanction_amount), 0.0).label("total_sanctioned"),
-        func.coalesce(func.sum(Work.total_fund_disbursed), 0.0).label("total_disbursed"),
-        func.coalesce(func.avg(Work.utilization_ratio), 0.0).label("avg_utilization"),
-        func.coalesce(func.avg(Work.final_risk_score), 0.0).label("avg_risk_score"),
-        func.coalesce(high_risk_expr(), 0).label("high_risk_count"),
-        func.coalesce(medium_risk_expr(), 0).label("medium_risk_count"),
-        func.coalesce(reviewed_expr(), 0).label("reviewed_count"),
-    ).filter(match).first()
-
-    if not agg or int(agg.works_count or 0) == 0:
+    agg_rows = list(works.aggregate([
+        {"$match": match},
+        {"$group": {**_group_works(None), "mp_set": {"$addToSet": "$mp_name"}}},
+        {"$set": {"mp_count": {"$size": {"$setDifference": ["$mp_set", [None, ""]]}}}},
+    ]))
+    if not agg_rows or int(agg_rows[0]["count"] or 0) == 0:
         return None
+    agg = agg_rows[0]
 
-    tier_rows = (
-        db.query(Work.risk_tier, func.count(Work.work_id))
-        .filter(match).group_by(Work.risk_tier).all()
-    )
     tier_distribution = {HIGH_RISK_TIER: 0, MEDIUM_RISK_TIER: 0, LOW_RISK_TIER: 0}
-    for tier, cnt in tier_rows:
-        if tier in tier_distribution:
-            tier_distribution[tier] = int(cnt)
+    for row in works.aggregate([
+        {"$match": match},
+        {"$group": {"_id": "$risk_tier", "count": {"$sum": 1}}},
+    ]):
+        if row["_id"] in tier_distribution:
+            tier_distribution[row["_id"]] = int(row["count"])
 
-    mp_rows = (
-        db.query(
-            Work.mp_name.label("name"),
-            func.count(Work.work_id).label("works_count"),
-            func.coalesce(func.sum(Work.sanction_amount), 0.0).label("total_sanctioned"),
-            func.coalesce(func.sum(Work.total_fund_disbursed), 0.0).label("total_disbursed"),
-            func.coalesce(func.avg(Work.utilization_ratio), 0.0).label("avg_utilization"),
-            func.coalesce(func.avg(Work.final_risk_score), 0.0).label("avg_risk_score"),
-            func.coalesce(func.max(Work.final_risk_score), 0.0).label("max_risk_score"),
-            func.coalesce(high_risk_expr(), 0).label("high_risk_count"),
-            func.coalesce(medium_risk_expr(), 0).label("medium_risk_count"),
-            func.coalesce(reviewed_expr(), 0).label("reviewed_count"),
-            func.max(Work.constituency).label("constituency"),
-        )
-        .filter(match, Work.mp_name.isnot(None), Work.mp_name != "")
-        .group_by(Work.mp_name)
-        .order_by(desc(high_risk_expr()), desc(func.sum(Work.sanction_amount)))
-        .limit(12)
-        .all()
-    )
+    mp_match = {**match, "mp_name": {"$nin": [None, ""]}}
+    mp_rows = works.aggregate([
+        {"$match": mp_match},
+        {"$group": _group_works("mp_name", with_extremes=True)},
+        {"$sort": {"high_risk_count": DESCENDING, "total_sanctioned": DESCENDING}},
+        {"$limit": 12},
+    ])
 
-    def _breakdown(column, limit):
-        rows = (
-            db.query(
-                column.label("name"),
-                func.count(Work.work_id).label("count"),
-                func.coalesce(func.sum(Work.sanction_amount), 0.0).label("total_sanctioned"),
-                func.coalesce(func.sum(Work.total_fund_disbursed), 0.0).label("total_disbursed"),
-                func.coalesce(func.avg(Work.final_risk_score), 0.0).label("avg_risk_score"),
-                func.coalesce(high_risk_expr(), 0).label("high_risk_count"),
-            )
-            .filter(match, column.isnot(None), column != "")
-            .group_by(column)
-            .order_by(desc(func.sum(Work.sanction_amount)))
-            .limit(limit)
-            .all()
-        )
+    def _breakdown(column: str, limit: int) -> list:
+        bmatch = {**match, column: {"$nin": [None, ""]}}
+        rows = works.aggregate([
+            {"$match": bmatch},
+            {"$group": {
+                "_id": f"${column}",
+                "count": {"$sum": 1},
+                "total_sanctioned": {"$sum": {"$ifNull": ["$sanction_amount", 0.0]}},
+                "total_disbursed": {"$sum": {"$ifNull": ["$total_fund_disbursed", 0.0]}},
+                "avg_risk_score": {"$avg": {"$ifNull": ["$final_risk_score", 0.0]}},
+                "high_risk_count": {"$sum": {"$cond": [{"$eq": ["$risk_tier", HIGH_RISK_TIER]}, 1, 0]}},
+            }},
+            {"$sort": {"total_sanctioned": DESCENDING}},
+            {"$limit": limit},
+        ])
         return [
             {
-                "name": r.name,
-                "count": int(r.count),
-                "total_sanctioned": round(float(r.total_sanctioned), 2),
-                "total_disbursed": round(float(r.total_disbursed), 2),
-                "avg_risk_score": round(float(r.avg_risk_score), 1),
-                "high_risk_count": int(r.high_risk_count),
+                "name": r["_id"],
+                "count": int(r["count"]),
+                "total_sanctioned": round(float(r["total_sanctioned"]), 2),
+                "total_disbursed": round(float(r["total_disbursed"]), 2),
+                "avg_risk_score": round(float(r["avg_risk_score"]), 1),
+                "high_risk_count": int(r["high_risk_count"]),
             }
             for r in rows
         ]
 
     return {
         "state": state.strip(),
-        "works_count": int(agg.works_count),
-        "mp_count": int(agg.mp_count or 0),
-        "total_sanctioned": round(float(agg.total_sanctioned), 2),
-        "total_disbursed": round(float(agg.total_disbursed), 2),
-        "avg_utilization": round(float(agg.avg_utilization), 4),
-        "avg_risk_score": round(float(agg.avg_risk_score), 1),
-        "high_risk_count": int(agg.high_risk_count),
-        "medium_risk_count": int(agg.medium_risk_count),
+        "works_count": int(agg["count"]),
+        "mp_count": int(agg.get("mp_count") or 0),
+        "total_sanctioned": round(float(agg["total_sanctioned"]), 2),
+        "total_disbursed": round(float(agg["total_disbursed"]), 2),
+        "avg_utilization": round(float(agg["avg_utilization"]), 4),
+        "avg_risk_score": round(float(agg["avg_risk_score"]), 1),
+        "high_risk_count": int(agg["high_risk_count"]),
+        "medium_risk_count": int(agg["medium_risk_count"]),
         "low_risk_count": tier_distribution[LOW_RISK_TIER],
-        "reviewed_count": int(agg.reviewed_count),
+        "reviewed_count": int(agg["reviewed_count"]),
         "tier_distribution": tier_distribution,
         "top_mps": [
             {
-                "mp_name": r.name,
-                "constituency": r.constituency,
+                "mp_name": r["_id"],
+                "constituency": r.get("constituency"),
                 "state": state.strip(),
-                "works_count": int(r.works_count),
-                "total_sanctioned": round(float(r.total_sanctioned), 2),
-                "total_disbursed": round(float(r.total_disbursed), 2),
-                "avg_utilization": round(float(r.avg_utilization), 4),
-                "avg_risk_score": round(float(r.avg_risk_score), 1),
-                "max_risk_score": round(float(r.max_risk_score), 1),
-                "high_risk_count": int(r.high_risk_count),
-                "medium_risk_count": int(r.medium_risk_count),
-                "reviewed_count": int(r.reviewed_count),
+                "works_count": int(r["count"]),
+                "total_sanctioned": round(float(r["total_sanctioned"]), 2),
+                "total_disbursed": round(float(r["total_disbursed"]), 2),
+                "avg_utilization": round(float(r["avg_utilization"]), 4),
+                "avg_risk_score": round(float(r["avg_risk_score"]), 1),
+                "max_risk_score": round(float(r["max_risk_score"]), 1),
+                "high_risk_count": int(r["high_risk_count"]),
+                "medium_risk_count": int(r["medium_risk_count"]),
+                "reviewed_count": int(r["reviewed_count"]),
             }
             for r in mp_rows
         ],
-        "category_breakdown": _breakdown(Work.work_category, 12),
-        "agency_breakdown": _breakdown(Work.ida, 8),
+        "category_breakdown": _breakdown("work_category", 12),
+        "agency_breakdown": _breakdown("ida", 8),
     }
 
 
@@ -547,55 +506,93 @@ def get_state_profile(db: Session, state: str) -> Optional[dict]:
 # Portfolio-wide analytics for chart widgets
 # ------------------------------------------------------------------------------
 
-def get_category_analytics(db: Session, house: Optional[str] = None) -> list:
+def get_category_analytics(db, house: Optional[str] = None) -> list:
     """Fund share & risk per work category (for the overview charts)."""
-    rows = apply_house(db.query(
-            Work.work_category.label("name"),
-            func.count(Work.work_id).label("count"),
-            func.coalesce(func.sum(Work.sanction_amount), 0.0).label("total_sanctioned"),
-            func.coalesce(func.sum(Work.total_fund_disbursed), 0.0).label("total_disbursed"),
-            func.coalesce(func.avg(Work.final_risk_score), 0.0).label("avg_risk_score"),
-            func.coalesce(high_risk_expr(), 0).label("high_risk_count"),
-        ), house) \
-        .filter(Work.work_category.isnot(None), Work.work_category != "") \
-        .group_by(Work.work_category) \
-        .order_by(desc(func.sum(Work.sanction_amount))) \
-        .all()
-    total_sanctioned = sum(float(r.total_sanctioned) for r in rows) or 1.0
+    match: dict = {"work_category": {"$nin": [None, ""]}}
+    if house:
+        match["house"] = house.strip()
+    rows = works.aggregate([
+        {"$match": match},
+        {"$group": {
+            "_id": "$work_category",
+            "count": {"$sum": 1},
+            "total_sanctioned": {"$sum": {"$ifNull": ["$sanction_amount", 0.0]}},
+            "total_disbursed": {"$sum": {"$ifNull": ["$total_fund_disbursed", 0.0]}},
+            "avg_risk_score": {"$avg": {"$ifNull": ["$final_risk_score", 0.0]}},
+            "high_risk_count": {"$sum": {"$cond": [{"$eq": ["$risk_tier", HIGH_RISK_TIER]}, 1, 0]}},
+        }},
+        {"$sort": {"total_sanctioned": DESCENDING}},
+    ])
+    rows = list(rows)
+    total_sanctioned = sum(float(r["total_sanctioned"]) for r in rows) or 1.0
     return [
         {
-            "name": r.name,
-            "count": int(r.count),
-            "total_sanctioned": round(float(r.total_sanctioned), 2),
-            "total_disbursed": round(float(r.total_disbursed), 2),
-            "avg_risk_score": round(float(r.avg_risk_score), 1),
-            "high_risk_count": int(r.high_risk_count),
-            "sanctioned_share": round(float(r.total_sanctioned) / total_sanctioned, 4),
+            "name": r["_id"],
+            "count": int(r["count"]),
+            "total_sanctioned": round(float(r["total_sanctioned"]), 2),
+            "total_disbursed": round(float(r["total_disbursed"]), 2),
+            "avg_risk_score": round(float(r["avg_risk_score"]), 1),
+            "high_risk_count": int(r["high_risk_count"]),
+            "sanctioned_share": round(float(r["total_sanctioned"]) / total_sanctioned, 4),
         }
         for r in rows
     ]
 
 
-def get_status_analytics(db: Session, house: Optional[str] = None) -> list:
+def get_status_analytics(db, house: Optional[str] = None) -> list:
     """Execution status distribution (completed / ongoing / etc.)."""
-    rows = apply_house(db.query(
-            Work.work_status.label("name"),
-            func.count(Work.work_id).label("count"),
-            func.coalesce(func.sum(Work.sanction_amount), 0.0).label("total_sanctioned"),
-            func.coalesce(func.avg(Work.final_risk_score), 0.0).label("avg_risk_score"),
-        ), house) \
-        .filter(Work.work_status.isnot(None), Work.work_status != "") \
-        .group_by(Work.work_status) \
-        .order_by(desc(func.count(Work.work_id))) \
-        .all()
-    total = sum(int(r.count) for r in rows) or 1
+    match: dict = {"work_status": {"$nin": [None, ""]}}
+    if house:
+        match["house"] = house.strip()
+    rows = works.aggregate([
+        {"$match": match},
+        {"$group": {
+            "_id": "$work_status",
+            "count": {"$sum": 1},
+            "total_sanctioned": {"$sum": {"$ifNull": ["$sanction_amount", 0.0]}},
+            "avg_risk_score": {"$avg": {"$ifNull": ["$final_risk_score", 0.0]}},
+        }},
+        {"$sort": {"count": DESCENDING}},
+    ])
+    rows = list(rows)
+    total = sum(int(r["count"]) for r in rows) or 1
     return [
         {
-            "name": r.name,
-            "count": int(r.count),
-            "share": round(int(r.count) / total, 4),
-            "total_sanctioned": round(float(r.total_sanctioned), 2),
-            "avg_risk_score": round(float(r.avg_risk_score), 1),
+            "name": r["_id"],
+            "count": int(r["count"]),
+            "share": round(int(r["count"]) / total, 4),
+            "total_sanctioned": round(float(r["total_sanctioned"]), 2),
+            "avg_risk_score": round(float(r["avg_risk_score"]), 1),
+        }
+        for r in rows
+    ]
+
+
+def top_entity_stats(group_field: str, house: Optional[str] = None,
+                     limit: int = 8) -> list:
+    """Top-risk entities (states / MPs / vendors) for the overview dashboard."""
+    match: dict = {group_field: {"$nin": [None, ""]}}
+    if house:
+        match["house"] = house.strip()
+    rows = works.aggregate([
+        {"$match": match},
+        {"$group": {
+            "_id": f"${group_field}",
+            "count": {"$sum": 1},
+            "avg_score": {"$avg": {"$ifNull": ["$final_risk_score", 0.0]}},
+            "high_count": {"$sum": {"$cond": [{"$eq": ["$risk_tier", HIGH_RISK_TIER]}, 1, 0]}},
+            "total_sanctioned": {"$sum": {"$ifNull": ["$sanction_amount", 0.0]}},
+        }},
+        {"$sort": {"high_count": DESCENDING, "avg_score": DESCENDING}},
+        {"$limit": limit},
+    ])
+    return [
+        {
+            "name": r["_id"],
+            "count": int(r["count"]),
+            "avg_risk_score": round(float(r["avg_score"] or 0), 1),
+            "high_risk_count": int(r["high_count"] or 0),
+            "total_sanctioned": round(float(r["total_sanctioned"] or 0), 2),
         }
         for r in rows
     ]
@@ -614,19 +611,21 @@ EXPORT_COLUMNS = [
 ]
 
 
-def stream_works_csv(query: Query, row_limit: int = 50000) -> Generator[str, None, None]:
+def stream_works_csv(filt: dict, row_limit: int = 50000) -> Generator[str, None, None]:
     """Stream filtered works as CSV rows; never materializes the full dataset."""
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(EXPORT_COLUMNS)
     yield buf.getvalue()
 
+    projection = {col: 1 for col in EXPORT_COLUMNS}
+    projection["_id"] = 0
     yielded = 0
-    for w in query.yield_per(500):
+    for w in works.find(filt, projection).batch_size(500):
         buf.seek(0)
         buf.truncate(0)
         writer.writerow([
-            getattr(w, col) if getattr(w, col) is not None else ""
+            w.get(col) if w.get(col) is not None else ""
             for col in EXPORT_COLUMNS
         ])
         yield buf.getvalue()

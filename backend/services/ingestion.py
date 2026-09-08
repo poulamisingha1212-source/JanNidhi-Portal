@@ -19,9 +19,10 @@ from pathlib import Path
 import logging
 
 import pandas as pd
+from pymongo import ReplaceOne, UpdateOne
 
-from backend.database import SessionLocal
-from backend.models import Work, SyncLog, MPAllocation
+from backend.database import works, mp_allocations, sync_logs, next_id
+from backend.models import now_utc, lower_or_none
 from backend.config import settings
 from model.risk_engine import score_dataset
 
@@ -36,7 +37,7 @@ SOURCE_LIVE = "MPLADS Live Dashboard API (mplads.mospi.gov.in)"
 
 VALID_MODES = {"auto", "live"}
 
-_UPSERT_CHUNK = 900  # stay under SQLite's 999 bind-parameter limit
+_UPSERT_CHUNK = 1000  # bulk_write operations per round-trip
 
 
 
@@ -125,7 +126,7 @@ def _reshape_long_format(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _normalize_work(row: pd.Series) -> dict:
-    """Map any scored row into the Work table schema (used for bulk mappings)."""
+    """Map any scored row into a works document (used for bulk upserts)."""
     def _s(key, default=None):
         val = row.get(key)
         return None if pd.isna(val) else str(val)
@@ -139,7 +140,12 @@ def _normalize_work(row: pd.Series) -> dict:
 
     flags = row.get("rule_flags_triggered", "[]")
     if isinstance(flags, (list, tuple)):
-        flags = str(list(flags))
+        flags = list(flags)
+    elif isinstance(flags, str):
+        # CSV round-trips serialize lists back to strings — parse them so the
+        # document stores a real array like every other consumer expects.
+        parsed = _parse_flags_string(flags)
+        flags = parsed
 
     # House must be propagated by the ingestion pipeline via the 'house' column.
     # We no longer infer it from constituency to avoid silently misclassifying MPs.
@@ -157,10 +163,14 @@ def _normalize_work(row: pd.Series) -> dict:
     if work_id.endswith(".0"):
         work_id = work_id[:-2]
 
+    mp_name = _s("mp_name")
+    state = _s("state")
     return {
         "work_id": work_id,
-        "mp_name": _s("mp_name"),
-        "state": _s("state"),
+        "mp_name": mp_name,
+        "_mp_name_lower": lower_or_none(mp_name),
+        "state": state,
+        "_state_lower": lower_or_none(state),
         "constituency": _s("constituency"),
         "house": house,
         "ida": _s("ida"),
@@ -186,12 +196,22 @@ def _normalize_work(row: pd.Series) -> dict:
     }
 
 
-def _upsert_dataframe(db, df: pd.DataFrame) -> dict:
-    """Chunked bulk upsert — one round-trip per ~900 rows, not per row.
-    Each chunk commits immediately so the SQLite write lock is released
-    continuously and concurrent API reads stay live during long syncs."""
+def _parse_flags_string(raw: str) -> list:
+    """Parse a serialized flags string ('['a', 'b']') back into a list."""
+    import ast
+    try:
+        parsed = ast.literal_eval(raw)
+        return [str(f) for f in parsed] if isinstance(parsed, (list, tuple)) else []
+    except (ValueError, SyntaxError):
+        return [f.strip() for f in raw.strip("[]").replace("'", "").split(",") if f.strip()]
+
+
+def _upsert_dataframe(df: pd.DataFrame) -> dict:
+    """Chunked bulk upsert — one round-trip per ~1000 rows, not per row.
+    Each chunk commits immediately so concurrent API reads stay live during
+    long syncs."""
     inserted = updated = 0
-    now = datetime.now(timezone.utc)
+    now = now_utc()
     rows = [r for _, r in df.iterrows() if not pd.isna(r.get("work_id"))]
 
     for start in range(0, len(rows), _UPSERT_CHUNK):
@@ -199,38 +219,32 @@ def _upsert_dataframe(db, df: pd.DataFrame) -> dict:
         mappings = [_normalize_work(r) for r in chunk]
         ids = [m["work_id"] for m in mappings]
 
-        existing_ids = {
-            w[0]
-            for w in db.query(Work.work_id).filter(Work.work_id.in_(ids)).all()
-        }
+        existing_ids = set(works.distinct("work_id", {"work_id": {"$in": ids}}))
 
-        new_mappings, upd_mappings = [], []
+        ops = []
         for m in mappings:
+            m["updated_at"] = now
             if m["work_id"] in existing_ids:
-                upd_mappings.append(m)
+                ops.append(UpdateOne({"work_id": m["work_id"]}, {"$set": m}))
+                updated += 1
             else:
                 m["created_at"] = now
-                new_mappings.append(m)
-
-        if new_mappings:
-            db.bulk_insert_mappings(Work, new_mappings)
-            inserted += len(new_mappings)
-        if upd_mappings:
-            for m in upd_mappings:
-                m["updated_at"] = now
-            db.bulk_update_mappings(Work, upd_mappings)
-            updated += len(upd_mappings)
-        db.commit()
+                ops.append(ReplaceOne({"work_id": m["work_id"]}, m, upsert=True))
+                inserted += 1
+        if ops:
+            works.bulk_write(ops, ordered=False)
 
     return {"inserted": inserted, "updated": updated, "processed": len(rows)}
 
 
-def _upsert_allocations(db, long_df: pd.DataFrame) -> int:
+def _upsert_allocations(long_df: pd.DataFrame) -> int:
     """Upsert the per-MP allocated funds from the portal's Allocated Limit
     dataset into mp_allocations, keyed on (mp_name, house, constituency, state)."""
     alloc = long_df[long_df.get("record_type") == "MP Allocated Limit"]
     if alloc.empty:
         return 0
+    now = now_utc()
+    ops = []
     count = 0
     for _, r in alloc.iterrows():
         if pd.isna(r.get("mp_name")):
@@ -246,8 +260,9 @@ def _upsert_allocations(db, long_df: pd.DataFrame) -> int:
             )
             house_val = "Lok Sabha"
 
+        mp_name = str(r["mp_name"])
         key = dict(
-            mp_name=str(r["mp_name"]),
+            mp_name=mp_name,
             house=house_val,
             constituency=str(r.get("constituency") or ""),
             state=str(r.get("state") or ""),
@@ -255,36 +270,33 @@ def _upsert_allocations(db, long_df: pd.DataFrame) -> int:
         values = dict(
             allocated_amount=float(r.get("allocated_amount") or 0),
             tenure_start=str(r.get("recommended_date")) if pd.notna(r.get("recommended_date")) else None,
-            updated_at=datetime.now(timezone.utc),
+            updated_at=now,
         )
-        row = db.query(MPAllocation).filter_by(**key).one_or_none()
-        if row:
-            for k, v in values.items():
-                setattr(row, k, v)
-        else:
-            db.add(MPAllocation(**key, **values))
+        doc = {**key, **values, "_mp_name_lower": lower_or_none(mp_name)}
+        ops.append(ReplaceOne(key, doc, upsert=True))
         count += 1
-    db.commit()
+    if ops:
+        mp_allocations.bulk_write(ops, ordered=False)
     return count
 
 
-def _log_sync(db, *, source, status, start_dt, counts=None, note=None):
-    end_dt = datetime.now(timezone.utc)
+def _log_sync(*, source, status, start_dt, counts=None, note=None):
+    end_dt = now_utc()
     counts = counts or {}
-    db.add(SyncLog(
-        run_timestamp=start_dt,
-        start_time=start_dt,
-        end_time=end_dt,
-        status=status,
-        source=source,
-        rows_fetched=counts.get("fetched", 0),
-        rows_processed=counts.get("processed", 0),
-        rows_inserted=counts.get("inserted", 0),
-        rows_updated=counts.get("updated", 0),
-        rows_rejected=counts.get("rejected", 0),
-        error_message=note,
-    ))
-    db.commit()
+    sync_logs.insert_one({
+        "id": next_id("sync_logs"),
+        "run_timestamp": start_dt,
+        "start_time": start_dt,
+        "end_time": end_dt,
+        "status": status,
+        "source": source,
+        "rows_fetched": counts.get("fetched", 0),
+        "rows_processed": counts.get("processed", 0),
+        "rows_inserted": counts.get("inserted", 0),
+        "rows_updated": counts.get("updated", 0),
+        "rows_rejected": counts.get("rejected", 0),
+        "error_message": note,
+    })
 
 
 # ------------------------------------------------------------------------------
@@ -301,20 +313,18 @@ def run_ingestion(mode: str = "auto", source_file_path: Path = None) -> dict:
     if mode not in VALID_MODES:
         raise ValueError(f"Invalid ingestion mode '{mode}'. Must be one of {sorted(VALID_MODES)}")
 
-    start_dt = datetime.now(timezone.utc)
+    start_dt = now_utc()
     t0 = time.time()
-    db = SessionLocal()
 
     try:
         if source_file_path is not None:
             # Explicit file override (tests / offline replays)
             df = pd.read_csv(source_file_path)
             scored = score_dataset(_reshape_long_format(df), model_dir=settings.MODEL_DIR)
-            counts = _upsert_dataframe(db, scored)
+            counts = _upsert_dataframe(scored)
             counts["fetched"] = len(df)
-            db.commit()
             label = f"Ingestion Feed (file: {Path(source_file_path).name})"
-            _log_sync(db, source=label, status="success", start_dt=start_dt, counts=counts)
+            _log_sync(source=label, status="success", start_dt=start_dt, counts=counts)
             return {"status": "success", "mode": "file", "source": label,
                     "duration_seconds": round(time.time() - t0, 2), **counts}
 
@@ -332,67 +342,65 @@ def run_ingestion(mode: str = "auto", source_file_path: Path = None) -> dict:
             except Exception as ce:
                 print(f"Feed caching skipped: {ce}")
 
-            alloc_map = {a.mp_name: a.allocated_amount for a in db.query(MPAllocation).all()}
+            alloc_map = {
+                a["mp_name"]: a.get("allocated_amount") or 0.0
+                for a in mp_allocations.find({}, {"mp_name": 1, "allocated_amount": 1})
+            }
             scored = score_dataset(_reshape_long_format(raw.copy()), model_dir=settings.MODEL_DIR,
                                    mp_allocations=alloc_map)
-            counts = _upsert_dataframe(db, scored)
-            counts["allocations"] = _upsert_allocations(db, raw)
+            counts = _upsert_dataframe(scored)
+            counts["allocations"] = _upsert_allocations(raw)
             counts["fetched"] = len(raw)
-            db.commit()
-            _log_sync(db, source=SOURCE_LIVE, status="success",
+            _log_sync(source=SOURCE_LIVE, status="success",
                       start_dt=start_dt, counts=counts)
             return {"status": "success", "mode": "live", "source": SOURCE_LIVE,
                     "duration_seconds": round(time.time() - t0, 2), **counts}
         except Exception as e:
-            db.rollback()
             note = f"Live dashboard API unavailable ({e})"
-            _log_sync(db, source=SOURCE_LIVE, status="failed",
+            _log_sync(source=SOURCE_LIVE, status="failed",
                       start_dt=start_dt, note=note)
             return {"status": "failed", "mode": "live",
                     "error": note, "duration_seconds": round(time.time() - t0, 2)}
 
-    finally:
-        db.close()
+    except Exception as e:
+        # File-based replays raise through; live failures are logged above.
+        raise
 
 
 def get_sync_status() -> dict:
     """Returns the latest sync status and checks if data is stale (> 24 hours)."""
-    db = SessionLocal()
-    try:
-        last_sync = db.query(SyncLog).order_by(SyncLog.run_timestamp.desc()).first()
-        if not last_sync:
-            return {
-                "latest_sync_timestamp": None,
-                "latest_sync_status": "none",
-                "is_data_stale": True,
-                "staleness_message": "No sync records found. Please trigger an initial sync.",
-                "rows_processed": 0
-            }
-
-        now = datetime.now(timezone.utc)
-        sync_time = last_sync.run_timestamp
-        if sync_time.tzinfo is None:
-            sync_time = sync_time.replace(tzinfo=timezone.utc)
-
-        age_hours = (now - sync_time).total_seconds() / 3600.0
-        is_stale = age_hours > 24.0 or last_sync.status == "failed"
-
-        if last_sync.status == "failed":
-            msg = f"Data sync failed ({last_sync.error_message}). Displaying last-known-good dataset."
-        elif is_stale:
-            msg = f"Data is stale (last synced {round(age_hours, 1)} hours ago)."
-        else:
-            msg = f"Data is fresh and synchronized ({round(age_hours, 1)}h ago)."
-
+    last_sync = sync_logs.find_one(sort=[("run_timestamp", -1)])
+    if not last_sync:
         return {
-            "latest_sync_timestamp": last_sync.run_timestamp.isoformat(),
-            "latest_sync_status": last_sync.status,
-            "latest_sync_source": last_sync.source,
-            "is_data_stale": is_stale,
-            "staleness_message": msg,
-            "rows_processed": last_sync.rows_processed,
-            "source": last_sync.source,
-            "error_message": last_sync.error_message,
+            "latest_sync_timestamp": None,
+            "latest_sync_status": "none",
+            "is_data_stale": True,
+            "staleness_message": "No sync records found. Please trigger an initial sync.",
+            "rows_processed": 0
         }
-    finally:
-        db.close()
+
+    now = now_utc()
+    sync_time = last_sync["run_timestamp"]
+    if sync_time.tzinfo is None:
+        sync_time = sync_time.replace(tzinfo=timezone.utc)
+
+    age_hours = (now - sync_time).total_seconds() / 3600.0
+    is_stale = age_hours > 24.0 or last_sync["status"] == "failed"
+
+    if last_sync["status"] == "failed":
+        msg = f"Data sync failed ({last_sync.get('error_message')}). Displaying last-known-good dataset."
+    elif is_stale:
+        msg = f"Data is stale (last synced {round(age_hours, 1)} hours ago)."
+    else:
+        msg = f"Data is fresh and synchronized ({round(age_hours, 1)}h ago)."
+
+    return {
+        "latest_sync_timestamp": last_sync["run_timestamp"].isoformat(),
+        "latest_sync_status": last_sync["status"],
+        "latest_sync_source": last_sync.get("source"),
+        "is_data_stale": is_stale,
+        "staleness_message": msg,
+        "rows_processed": last_sync.get("rows_processed", 0),
+        "source": last_sync.get("source"),
+        "error_message": last_sync.get("error_message"),
+    }

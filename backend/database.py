@@ -1,63 +1,63 @@
-from sqlalchemy import create_engine, event, inspect, text
-from sqlalchemy.orm import declarative_base, sessionmaker
+"""MongoDB connection layer.
+
+A single MongoClient is shared process-wide. The four collections mirror the
+previous tables (works, mp_allocations, review_logs, sync_logs); get_db yields
+the database so FastAPI's Depends(get_db) contract is unchanged.
+"""
+from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
+
 from backend.config import settings
 
-connect_args = {}
-if settings.DATABASE_URL.startswith("sqlite"):
-    connect_args = {"check_same_thread": False, "timeout": 30}
-
-engine = create_engine(
-    settings.DATABASE_URL,
-    connect_args=connect_args,
-    pool_pre_ping=True,
+_client = MongoClient(
+    settings.MONGODB_URI,
+    appname="mplads-ai-sentinel",
+    serverSelectionTimeoutMS=15000,
+    connectTimeoutMS=15000,
+    # Live-sync bulk writes and long-running aggregation cursors must not
+    # time out mid-flight; the driver default (30s idle) is too tight.
+    socketTimeoutMS=600000,
 )
+db = _client[settings.MONGO_DB_NAME]
 
-if settings.DATABASE_URL.startswith("sqlite"):
-    @event.listens_for(engine, "connect")
-    def _set_sqlite_pragma(dbapi_connection, connection_record):
-        # WAL lets readers and the sync writer work concurrently; busy_timeout
-        # makes any residual lock contention wait instead of erroring.
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=30000")
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.close()
-
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+works = db["works"]
+mp_allocations = db["mp_allocations"]
+review_logs = db["review_logs"]
+sync_logs = db["sync_logs"]
+_counters = db["counters"]
 
 
-def run_lightweight_migrations() -> None:
-    """Schema additions that Base.metadata.create_all cannot apply to
-    existing tables (it only creates missing tables, never new columns)."""
-    inspector = inspect(engine)
-    if "works" not in inspector.get_table_names():
-        return
-    columns = {c["name"] for c in inspector.get_columns("works")}
+def next_id(sequence: str) -> int:
+    """Sequential integer ids for documents surfaced with int ids (sync logs,
+    review logs), matching the previous autoincrement columns."""
+    doc = _counters.find_one_and_update(
+        {"_id": sequence},
+        {"$inc": {"seq": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return int(doc["seq"])
 
-    if "house" not in columns:
-        with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE works ADD COLUMN house VARCHAR(50)"))
-            conn.execute(text("CREATE INDEX ix_works_house ON works (house)"))
-        print("Migration: added works.house column")
 
-    # Backfill house for rows ingested before the column existed. Live data is
-    # tagged at ingestion; historical rows are inferred from the constituency
-    # (Rajya Sabha MPs sit for 'Sitting Rajya Sabha', everything else is a
-    # Lok Sabha constituency).
-    with engine.begin() as conn:
-        result = conn.execute(text(
-            "UPDATE works SET house = CASE "
-            "WHEN lower(constituency) LIKE '%rajya sabha%' THEN 'Rajya Sabha' "
-            "ELSE 'Lok Sabha' END WHERE house IS NULL"
-        ))
-        if result.rowcount:
-            print(f"Migration: backfilled house on {result.rowcount} works rows")
+def ensure_indexes() -> None:
+    """Idempotent index creation, called at startup."""
+    works.create_index([("work_id", ASCENDING)], unique=True)
+    works.create_index([("priority_rank", ASCENDING), ("work_id", ASCENDING)])
+    works.create_index([("risk_tier", ASCENDING), ("priority_rank", ASCENDING)])
+    works.create_index([("mp_name_lower", ASCENDING), ("house", ASCENDING)])
+    works.create_index([("state_lower", ASCENDING), ("priority_rank", ASCENDING)])
+    works.create_index([("house", ASCENDING)])
+    works.create_index([("work_category", ASCENDING)])
+    works.create_index([("work_status", ASCENDING)])
+    works.create_index([("final_risk_score", ASCENDING)])
+    mp_allocations.create_index(
+        [("mp_name", ASCENDING), ("house", ASCENDING),
+         ("constituency", ASCENDING), ("state", ASCENDING)],
+        unique=True,
+    )
+    mp_allocations.create_index([("mp_name_lower", ASCENDING)])
+    review_logs.create_index([("work_id", ASCENDING), ("created_at", DESCENDING)])
+    sync_logs.create_index([("run_timestamp", DESCENDING)])
 
 
 def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    yield db

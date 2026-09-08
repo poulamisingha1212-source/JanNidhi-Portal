@@ -1,19 +1,19 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional, List
+import secrets
 import threading
-import pandas as pd
-from fastapi import FastAPI, Depends, Query, HTTPException, status, Header
+
+from fastapi import FastAPI, Depends, Query, HTTPException, Request, status, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, desc, asc, case
-from sqlalchemy.orm import Session
+from pymongo import ASCENDING, DESCENDING
+from pymongo.errors import PyMongoError
 
 from backend.config import settings
-from backend.database import get_db, engine, Base, run_lightweight_migrations
-from backend.models import Work, ReviewLog, SyncLog, MPAllocation
+from backend.database import get_db, works, review_logs, sync_logs, mp_allocations, ensure_indexes
 from backend.schemas import (
     WorkListItem, WorkPaginationResponse, CasePacketResponse,
     ReviewCreateRequest, ReviewResponse, StatsOverviewResponse,
@@ -22,7 +22,7 @@ from backend.schemas import (
     BreakdownStat, CategoryStat, StatusStat, HealthResponse
 )
 from backend.auth import (
-    get_current_role, require_reviewer_role, require_mospi_admin_role,
+    get_current_role, require_reviewer_role,
     ROLE_MOSPI_REVIEWER, ROLE_PUBLIC_TIER
 )
 from backend.seeder import seed_database
@@ -36,28 +36,30 @@ scheduler = BackgroundScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Ensure tables exist, seed database if empty, and start scheduler
-    Base.metadata.create_all(bind=engine)
-    run_lightweight_migrations()
+    # Startup: ensure indexes, load risk models, and bootstrap the database.
+    ensure_indexes()
     load_models(settings.MODEL_DIR)
     seed_database()
 
-    # Nightly live sync at 03:00 Indian Standard Time
-    scheduler.add_job(
-        run_ingestion,
-        CronTrigger(hour=3, minute=0, timezone="Asia/Kolkata"),
-        kwargs={"mode": "live"},
-        id="nightly_mplads_sync",
-        replace_existing=True,
-    )
-    scheduler.start()
-    print("APScheduler started: nightly MPLADS sync at 03:00 IST.")
+    if not settings.IS_SERVERLESS:
+        # Nightly live sync at 03:00 Indian Standard Time. Serverless
+        # platforms freeze the process between requests, so there the sync
+        # is invoked by the platform cron (GET /api/cron/sync) instead.
+        scheduler.add_job(
+            run_ingestion,
+            CronTrigger(hour=3, minute=0, timezone="Asia/Kolkata"),
+            kwargs={"mode": "live"},
+            id="nightly_mplads_sync",
+            replace_existing=True,
+        )
+        scheduler.start()
+        print("APScheduler started: nightly MPLADS sync at 03:00 IST.")
 
     yield
 
-    # Shutdown
-    scheduler.shutdown()
-    print("APScheduler shut down.")
+    if not settings.IS_SERVERLESS:
+        scheduler.shutdown()
+        print("APScheduler shut down.")
 
 
 app = FastAPI(
@@ -95,7 +97,7 @@ def get_works(
     search: Optional[str] = Query(None, description="Search by Work ID, vendor or description"),
     sort_by: str = Query("priority_rank", description="Sort field"),
     order: str = Query("asc", description="Sort direction: 'asc' or 'desc'"),
-    db: Session = Depends(get_db),
+    db=Depends(get_db),
     user_role: str = Depends(get_current_role)
 ):
     """
@@ -110,29 +112,25 @@ def get_works(
     if order.lower() not in {"asc", "desc"}:
         raise HTTPException(status_code=400, detail="order must be 'asc' or 'desc'.")
 
-    query = analytics.apply_work_filters(
-        db.query(Work),
+    filt = analytics.apply_work_filters(
         state=state, mp_name=mp_name, house=house, ida=ida, risk_tier=risk_tier,
         work_category=work_category, work_status=work_status, search=search,
     )
 
-    total = query.count()
+    total = works.count_documents(filt)
 
-    sort_col = getattr(Work, sort_by)
-    if order.lower() == "desc":
-        query = query.order_by(desc(sort_col), Work.work_id.asc())
-    else:
-        query = query.order_by(asc(sort_col), Work.work_id.asc())
+    direction = DESCENDING if order.lower() == "desc" else ASCENDING
+    cursor = works.find(filt).sort([(sort_by, direction), ("work_id", ASCENDING)])
 
     offset = (page - 1) * page_size
-    items_raw = query.offset(offset).limit(page_size).all()
+    items_raw = cursor.skip(offset).limit(page_size)
 
     items = []
     for w in items_raw:
         item = analytics.work_to_list_item(w)
         flags = item["rule_flags_triggered"]
         causes = [RULE_DESCRIPTIONS.get(f, f"Flag triggered: {f}") for f in flags]
-        if w.is_anomaly:
+        if w.get("is_anomaly"):
             causes.append("Statistical outlier detected by Isolation Forest.")
         item["causes"] = causes
         items.append(WorkListItem(**item))
@@ -162,21 +160,20 @@ def export_works_csv(
     work_status: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     row_limit: int = Query(50000, ge=1, le=100000),
-    db: Session = Depends(get_db),
+    db=Depends(get_db),
     user_role: str = Depends(get_current_role)
 ):
     """
     Streams the filtered works list as a downloadable CSV (up to row_limit rows).
     Open-data companion to the /works endpoint — same filters, machine-readable.
     """
-    query = analytics.apply_work_filters(
-        db.query(Work).order_by(Work.priority_rank.asc()),
+    filt = analytics.apply_work_filters(
         state=state, mp_name=mp_name, house=house, ida=ida, risk_tier=risk_tier,
         work_category=work_category, work_status=work_status, search=search,
     )
     filename = f"mplads_works_export_{datetime.now(timezone.utc):%Y%m%d}.csv"
     return StreamingResponse(
-        analytics.stream_works_csv(query, row_limit=row_limit),
+        analytics.stream_works_csv(filt, row_limit=row_limit),
         media_type="text/csv",
         headers={
             "Content-Disposition": f'attachment; filename="{filename}"',
@@ -192,63 +189,32 @@ def export_works_csv(
 @app.get("/api/works/{work_id:path}", response_model=CasePacketResponse)
 def get_work_case_packet(
     work_id: str,
-    db: Session = Depends(get_db),
+    db=Depends(get_db),
     user_role: str = Depends(get_current_role)
 ):
     """
     Returns the complete case packet for the requested Work ID using risk_engine.generate_case_packet().
     """
-    work = db.query(Work).filter(Work.work_id == work_id.strip()).first()
+    work = works.find_one({"work_id": work_id.strip()}, {"_id": 0})
     if not work:
         raise HTTPException(status_code=404, detail=f"Work ID '{work_id}' not found.")
 
-    # Convert row to dict for authoritative risk_engine function
-    work_dict = {
-        'work_id': work.work_id,
-        'mp_name': work.mp_name,
-        'state': work.state,
-        'constituency': work.constituency,
-        'ida': work.ida,
-        'primary_vendor': work.primary_vendor,
-        'work_category': work.work_category,
-        'work_type': work.work_type,
-        'sanction_amount': work.sanction_amount,
-        'total_fund_disbursed': work.total_fund_disbursed,
-        'utilization_ratio': work.utilization_ratio,
-        'work_status': work.work_status,
-        'completion_date': work.completion_date,
-        'final_risk_score': work.final_risk_score,
-        'priority_rank': work.priority_rank,
-        'risk_tier': work.risk_tier,
-        'recommended_action': work.recommended_action,
-        'rule_flag_count': work.rule_flag_count,
-        'rule_flags_triggered': work.rule_flags_triggered,
-        'likelihood_score': work.likelihood_score,
-        'impact_score': work.impact_score,
-        'weighted_rule_score': work.weighted_rule_score,
-        'anomaly_percentile': work.anomaly_percentile,
-        'is_anomaly': work.is_anomaly,
-        'cost_mad_score': work.cost_mad_score,
-        'vendor_share_in_state': work.vendor_share_in_state,
-        'disbursement_mismatch_ratio': work.disbursement_mismatch_ratio,
-        'days_since_sanction': work.days_since_sanction,
-        'n_distinct_vendors': work.n_distinct_vendors,
-        'n_vendor_payments': work.n_vendor_payments,
-        'human_review_outcome': work.human_review_outcome,
-    }
+    # The document already carries exactly the fields the authoritative
+    # risk_engine function consumes (field names are unchanged from SQL).
+    work_dict = {k: v for k, v in work.items() if not k.startswith("_")}
 
     packet = generate_case_packet(work_id, work_row=work_dict)
 
     # Fetch prior reviews for this work
-    prior_reviews = db.query(ReviewLog).filter(ReviewLog.work_id == work_id).order_by(ReviewLog.created_at.desc()).all()
+    prior_reviews = review_logs.find({"work_id": work_id}).sort([("created_at", DESCENDING)])
     packet['prior_reviews'] = [
         {
-            'id': r.id,
-            'reviewer_name': r.reviewer_name,
-            'reviewer_role': r.reviewer_role,
-            'outcome': r.outcome,
-            'notes': r.notes if user_role != ROLE_PUBLIC_TIER else None,
-            'created_at': r.created_at.isoformat()
+            'id': r.get("id"),
+            'reviewer_name': r.get("reviewer_name"),
+            'reviewer_role': r.get("reviewer_role"),
+            'outcome': r.get("outcome"),
+            'notes': r.get("notes") if user_role != ROLE_PUBLIC_TIER else None,
+            'created_at': r["created_at"].isoformat() if r.get("created_at") else None
         }
         for r in prior_reviews
     ]
@@ -268,7 +234,7 @@ def get_mp_directory(
     search: Optional[str] = Query(None, description="Search by MP or constituency name"),
     sort_by: str = Query("total_sanctioned", description="Aggregate sort key"),
     order: str = Query("desc"),
-    db: Session = Depends(get_db),
+    db=Depends(get_db),
     user_role: str = Depends(get_current_role)
 ):
     """MP-wise directory: sanctioned/disbursed totals, utilization, risk profile."""
@@ -289,7 +255,7 @@ def get_mp_directory(
 def get_mp_profile(
     mp_name: str,
     house: Optional[str] = Query(None, description="Filter by House: 'Lok Sabha' or 'Rajya Sabha'"),
-    db: Session = Depends(get_db),
+    db=Depends(get_db),
     user_role: str = Depends(get_current_role)
 ):
     """Full public dossier for one MP: funds, risk tiers, categories, vendors, top works."""
@@ -306,7 +272,7 @@ def get_state_directory(
     house: Optional[str] = Query(None, description="Filter by House"),
     sort_by: str = Query("total_sanctioned"),
     order: str = Query("desc"),
-    db: Session = Depends(get_db),
+    db=Depends(get_db),
     user_role: str = Depends(get_current_role)
 ):
     """State-wise directory: funds, MP coverage and risk concentration."""
@@ -323,7 +289,7 @@ def get_state_directory(
 @app.get("/api/states/{state}", response_model=StateProfileResponse)
 def get_state_profile(
     state: str,
-    db: Session = Depends(get_db),
+    db=Depends(get_db),
     user_role: str = Depends(get_current_role)
 ):
     """State dossier: tier spread, top MPs, agencies and category splits."""
@@ -339,7 +305,7 @@ def get_state_profile(
 @app.get("/api/analytics/categories", response_model=List[CategoryStat])
 def get_category_analytics(
     house: Optional[str] = Query(None, description="Filter by House"),
-    db: Session = Depends(get_db),
+    db=Depends(get_db),
     user_role: str = Depends(get_current_role)
 ):
     """Fund share, disbursed value and risk per work category."""
@@ -349,7 +315,7 @@ def get_category_analytics(
 @app.get("/api/analytics/status", response_model=List[StatusStat])
 def get_status_analytics(
     house: Optional[str] = Query(None, description="Filter by House"),
-    db: Session = Depends(get_db),
+    db=Depends(get_db),
     user_role: str = Depends(get_current_role)
 ):
     """Execution status distribution with average risk per status."""
@@ -363,43 +329,58 @@ def get_status_analytics(
 @app.get("/api/stats/overview", response_model=StatsOverviewResponse)
 def get_stats_overview(
     house: Optional[str] = Query(None, description="Filter by House: 'Lok Sabha' or 'Rajya Sabha'"),
-    db: Session = Depends(get_db)
+    db=Depends(get_db)
 ):
     """
     Returns portfolio-level statistics including risk tier counts, top-risk MPs,
     top-risk states, top-risk vendors, and sync health / staleness status.
     """
-    def scoped(query):
-        return analytics.apply_house(query, house) if house else query
+    def scoped(filt: dict) -> dict:
+        return analytics.apply_house(filt, house) if house else filt
 
-    total_works = scoped(db.query(func.count(Work.work_id))).scalar() or 0
-    high_risk_count = scoped(db.query(func.count(Work.work_id))).filter(Work.risk_tier == 'High Risk - Review').scalar() or 0
-    medium_risk_count = scoped(db.query(func.count(Work.work_id))).filter(Work.risk_tier == 'Medium Risk - Monitor').scalar() or 0
-    low_risk_count = scoped(db.query(func.count(Work.work_id))).filter(Work.risk_tier == 'Low Risk').scalar() or 0
+    total_works = works.count_documents(scoped({}))
+    high_risk_count = works.count_documents(scoped({"risk_tier": 'High Risk - Review'}))
+    medium_risk_count = works.count_documents(scoped({"risk_tier": 'Medium Risk - Monitor'}))
+    low_risk_count = works.count_documents(scoped({"risk_tier": 'Low Risk'}))
 
-    total_sanctioned = scoped(db.query(func.sum(Work.sanction_amount))).scalar() or 0.0
-    total_disbursed = scoped(db.query(func.sum(Work.total_fund_disbursed))).scalar() or 0.0
-    avg_utilization = scoped(db.query(func.avg(Work.utilization_ratio))).scalar() or 0.0
-    avg_risk = scoped(db.query(func.avg(Work.final_risk_score))).scalar() or 0.0
-    reviewed_count = scoped(db.query(func.count(Work.work_id))).filter(Work.human_review_outcome.isnot(None)).scalar() or 0
+    def _scalar(stage_op: str, field: str, extra_match: Optional[dict] = None) -> float:
+        match = scoped(extra_match or {})
+        rows = works.aggregate([
+            {"$match": match},
+            {"$group": {"_id": None, "v": {stage_op: {"$ifNull": [f"${field}", 0.0]}}}},
+        ])
+        row = next(rows, None)
+        return float(row["v"]) if row and row["v"] is not None else 0.0
+
+    total_sanctioned = _scalar("$sum", "sanction_amount")
+    total_disbursed = _scalar("$sum", "total_fund_disbursed")
+    avg_utilization = _scalar("$avg", "utilization_ratio")
+    avg_risk = _scalar("$avg", "final_risk_score")
+    reviewed_count = works.count_documents(scoped({"human_review_outcome": {"$ne": None}}))
 
     # Portal allocation ledger (Total Allocated / utilization / ongoing payments).
-    # Filter MPAllocation.house directly — applying Work.house here would add
-    # `works` to FROM with no join and cartesian-inflate the ceiling.
-    alloc_q = db.query(func.sum(MPAllocation.allocated_amount))
+    # MPAllocation is filtered on its own house field — it is an MP-level
+    # ledger, not a per-work one.
+    alloc_match: dict = {}
     if house:
-        alloc_q = alloc_q.filter(MPAllocation.house == house.strip())
-    total_allocated = alloc_q.scalar() or 0.0
-    completed_q = scoped(db.query(func.count(Work.work_id))).filter(
-        Work.completion_date.isnot(None), Work.completion_date != "")
-    works_completed = completed_q.scalar() or 0
+        alloc_match["house"] = house.strip()
+    alloc_rows = mp_allocations.aggregate([
+        {"$match": alloc_match},
+        {"$group": {"_id": None, "total": {"$sum": {"$ifNull": ["$allocated_amount", 0.0]}}}},
+    ])
+    alloc_row = next(alloc_rows, None)
+    total_allocated = float(alloc_row["total"]) if alloc_row and alloc_row["total"] is not None else 0.0
+
+    works_completed = works.count_documents(
+        scoped({"completion_date": {"$nin": [None, ""]}})
+    )
     works_pending = max(0, total_works - works_completed)
 
     # Ongoing work payments: sum of disbursed funds for works that are NOT yet completed
-    ongoing_payments = scoped(db.query(func.sum(Work.total_fund_disbursed))).filter(
-        (Work.completion_date.is_(None) | (Work.completion_date == "")),
-        Work.total_fund_disbursed > 0
-    ).scalar() or 0.0
+    ongoing_payments = _scalar("$sum", "total_fund_disbursed", extra_match={
+        "$or": [{"completion_date": None}, {"completion_date": ""}],
+        "total_fund_disbursed": {"$gt": 0},
+    })
 
     tier_dist = {
         'High Risk - Review': high_risk_count,
@@ -407,82 +388,9 @@ def get_stats_overview(
         'Low Risk': low_risk_count,
     }
 
-    # Top risk states
-    top_states_raw = (
-        scoped(db.query(
-            Work.state,
-            func.count(Work.work_id).label("count"),
-            func.avg(Work.final_risk_score).label("avg_score"),
-            func.sum(case((Work.risk_tier == 'High Risk - Review', 1), else_=0)).label("high_count"),
-            func.sum(Work.sanction_amount).label("total_sanctioned")
-        ))
-        .filter(Work.state.isnot(None))
-        .group_by(Work.state)
-        .order_by(desc("high_count"), desc("avg_score"))
-        .limit(8)
-        .all()
-    )
-    top_states = [
-        EntityRiskStat(
-            name=s[0],
-            count=s[1],
-            avg_risk_score=round(float(s[2] or 0), 1),
-            high_risk_count=int(s[3] or 0),
-            total_sanctioned=round(float(s[4] or 0), 2)
-        )
-        for s in top_states_raw
-    ]
-
-    # Top risk MPs
-    top_mps_raw = (
-        scoped(db.query(
-            Work.mp_name,
-            func.count(Work.work_id).label("count"),
-            func.avg(Work.final_risk_score).label("avg_score"),
-            func.sum(case((Work.risk_tier == 'High Risk - Review', 1), else_=0)).label("high_count"),
-            func.sum(Work.sanction_amount).label("total_sanctioned")
-        ))
-        .filter(Work.mp_name.isnot(None))
-        .group_by(Work.mp_name)
-        .order_by(desc("high_count"), desc("avg_score"))
-        .limit(8)
-        .all()
-    )
-    top_mps = [
-        EntityRiskStat(
-            name=m[0],
-            count=m[1],
-            avg_risk_score=round(float(m[2] or 0), 1),
-            high_risk_count=int(m[3] or 0),
-            total_sanctioned=round(float(m[4] or 0), 2)
-        )
-        for m in top_mps_raw
-    ]
-
-    # Top risk vendors
-    top_vendors_raw = (
-        scoped(db.query(
-            Work.primary_vendor,
-            func.count(Work.work_id).label("count"),
-            func.avg(Work.final_risk_score).label("avg_score"),
-            func.sum(case((Work.risk_tier == 'High Risk - Review', 1), else_=0)).label("high_count"),
-            func.sum(Work.sanction_amount).label("total_sanctioned")
-        ))
-        .filter(Work.primary_vendor.isnot(None))
-        .group_by(Work.primary_vendor)
-        .order_by(desc("high_count"), desc("avg_score"))
-        .limit(8)
-    )
-    top_vendors = [
-        EntityRiskStat(
-            name=v[0],
-            count=v[1],
-            avg_risk_score=round(float(v[2] or 0), 1),
-            high_risk_count=int(v[3] or 0),
-            total_sanctioned=round(float(v[4] or 0), 2)
-        )
-        for v in top_vendors_raw
-    ]
+    top_states = [EntityRiskStat(**s) for s in analytics.top_entity_stats("state", house)]
+    top_mps = [EntityRiskStat(**m) for m in analytics.top_entity_stats("mp_name", house)]
+    top_vendors = [EntityRiskStat(**v) for v in analytics.top_entity_stats("primary_vendor", house)]
 
     # Sync freshness
     sync_info = get_sync_status()
@@ -522,7 +430,7 @@ def get_stats_overview(
 def record_human_review(
     work_id: str,
     payload: ReviewCreateRequest,
-    db: Session = Depends(get_db),
+    db=Depends(get_db),
     user_role: str = Depends(require_reviewer_role)
 ):
     """
@@ -537,29 +445,30 @@ def record_human_review(
             detail=f"Invalid review outcome '{payload.outcome}'. Must be one of: {list(valid_outcomes)}"
         )
 
-    work = db.query(Work).filter(Work.work_id == work_id.strip()).first()
-    if not work:
+    work_id = work_id.strip()
+    if not works.find_one({"work_id": work_id}):
         raise HTTPException(status_code=404, detail=f"Work ID '{work_id}' not found.")
 
     reviewer_name = payload.reviewer_name or user_role
     reviewer_role = payload.reviewer_role or user_role
+    now = datetime.now(timezone.utc)
 
-    # Update work record
-    work.human_review_outcome = norm_outcome
-    work.updated_at = datetime.now(timezone.utc)
+    from backend.database import next_id
+    review_log = {
+        "id": next_id("review_logs"),
+        "work_id": work_id,
+        "reviewer_name": reviewer_name,
+        "reviewer_role": reviewer_role,
+        "outcome": norm_outcome,
+        "notes": payload.notes,
+        "created_at": now,
+    }
+    review_logs.insert_one(review_log)
 
-    # Add audit log entry
-    review_log = ReviewLog(
-        work_id=work_id.strip(),
-        reviewer_name=reviewer_name,
-        reviewer_role=reviewer_role,
-        outcome=norm_outcome,
-        notes=payload.notes,
-        created_at=datetime.now(timezone.utc)
+    works.update_one(
+        {"work_id": work_id},
+        {"$set": {"human_review_outcome": norm_outcome, "updated_at": now}}
     )
-    db.add(review_log)
-    db.commit()
-    db.refresh(review_log)
 
     return ReviewResponse(
         success=True,
@@ -568,7 +477,7 @@ def record_human_review(
         reviewer_name=reviewer_name,
         reviewer_role=reviewer_role,
         notes=payload.notes,
-        created_at=review_log.created_at
+        created_at=now
     )
 
 
@@ -578,22 +487,20 @@ def record_human_review(
 @app.get("/api/filter-options")
 def get_filter_options(
     house: Optional[str] = Query(None, description="Filter options by House"),
-    db: Session = Depends(get_db)
+    db=Depends(get_db)
 ):
     """Returns unique filter values for the frontend dropdowns."""
-    scoped = lambda q: analytics.apply_house(q, house) if house else q
-    states = [s[0] for s in scoped(db.query(Work.state)).distinct().order_by(Work.state).all() if s[0]]
-    categories = [c[0] for c in scoped(db.query(Work.work_category)).distinct().order_by(Work.work_category).all() if c[0]]
-    statuses = [s[0] for s in scoped(db.query(Work.work_status)).distinct().order_by(Work.work_status).all() if s[0]]
-    mps = [
-        m[0] for m in scoped(db.query(Work.mp_name)).distinct().order_by(Work.mp_name).all()
-        if m[0]
-    ]
+    house_filter = {"house": house.strip()} if house else {}
+
+    def _sorted_distinct(field: str) -> list:
+        values = works.distinct(field, house_filter)
+        return sorted(v for v in values if v)
+
     return {
-        "states": states,
-        "categories": categories,
-        "statuses": statuses,
-        "mps": mps,
+        "states": _sorted_distinct("state"),
+        "categories": _sorted_distinct("work_category"),
+        "statuses": _sorted_distinct("work_status"),
+        "mps": _sorted_distinct("mp_name"),
         "risk_tiers": ["High Risk - Review", "Medium Risk - Monitor", "Low Risk"]
     }
 
@@ -608,33 +515,29 @@ def sync_status():
 @app.get("/api/sync/logs", response_model=List[SyncLogResponse])
 def get_sync_logs(
     limit: int = 20,
-    db: Session = Depends(get_db)
+    db=Depends(get_db)
 ):
-    logs = db.query(SyncLog).order_by(SyncLog.run_timestamp.desc()).limit(limit).all()
-    return logs
+    logs = sync_logs.find({}, {"_id": 0}).sort([("run_timestamp", DESCENDING)]).limit(limit)
+    return [SyncLogResponse(**doc) for doc in logs]
 
 
 _sync_in_flight = threading.Lock()
 
 
-@app.post("/sync/run")
-@app.post("/api/sync/run")
-def trigger_manual_sync(
-    mode: str = Query("auto", description="Ingestion mode: auto | live"),
-    user_role: str = Depends(require_mospi_admin_role)
-):
-    """
-    Manually trigger the ingestion pipeline. Restricted to MoSPI Reviewers.
+def _cron_authorized(request: Request) -> bool:
+    """Platform-cron authentication: Vercel Cron sends
+    `Authorization: Bearer $CRON_SECRET` when a CRON_SECRET env var exists."""
+    if not settings.CRON_SECRET:
+        return False
+    auth_header = request.headers.get("authorization", "")
+    cron_header = request.headers.get("x-cron-secret", "")
+    return (
+        secrets.compare_digest(auth_header, f"Bearer {settings.CRON_SECRET}")
+        or secrets.compare_digest(cron_header, settings.CRON_SECRET)
+    )
 
-    Runs in the background — the full portal fetch + risk-score of the Lok
-    Sabha dataset takes several minutes, so the request returns immediately.
-    Progress lands in sync_logs and the /api/sync/status endpoint; the UI
-    polls that banner.
 
-    Modes:
-      auto / live — pull directly from the live MPLADS dashboard API
-                    (mplads.mospi.gov.in /digigov), risk-score, and upsert.
-    """
+def _start_background_sync(mode: str) -> dict:
     if mode not in VALID_MODES:
         raise HTTPException(
             status_code=400,
@@ -663,14 +566,67 @@ def trigger_manual_sync(
                        "Progress appears in the audit log when it finishes."}
 
 
+@app.post("/sync/run")
+@app.post("/api/sync/run")
+def trigger_manual_sync(
+    request: Request,
+    mode: str = Query("auto", description="Ingestion mode: auto | live"),
+    user_role: str = Depends(get_current_role)
+):
+    """
+    Manually trigger the ingestion pipeline. Restricted to MoSPI Reviewers;
+    platform crons are also accepted with the CRON_SECRET credential.
+
+    Runs in the background — the full portal fetch + risk-score of the Lok
+    Sabha dataset takes several minutes, so the request returns immediately.
+    Progress lands in sync_logs and the /api/sync/status endpoint; the UI
+    polls that banner.
+
+    Modes:
+      auto / live — pull directly from the live MPLADS dashboard API
+                    (mplads.mospi.gov.in /digigov), risk-score, and upsert.
+    """
+    if not (_cron_authorized(request) or user_role == ROLE_MOSPI_REVIEWER):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: Only MoSPI Reviewers can perform governance and sync operations."
+        )
+    return _start_background_sync(mode)
+
+
+@app.get("/cron/sync")
+@app.get("/api/cron/sync")
+def cron_sync(
+    request: Request,
+    mode: str = Query("auto", description="Ingestion mode: auto | live"),
+):
+    """
+    Platform-cron entry point (Vercel Cron issues GET requests, so the POST
+    /sync/run path cannot be used). Runs the ingestion INLINE so the platform
+    billing/timeout envelope covers the whole run — chunked upserts mean a
+    timeout leaves partial progress in place rather than losing the run.
+    """
+    if not _cron_authorized(request):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access forbidden: invalid cron credentials."
+        )
+    if mode not in VALID_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid ingestion mode '{mode}'. Must be one of {sorted(VALID_MODES)}"
+        )
+    return run_ingestion(mode=mode)
+
+
 @app.get("/health")
 @app.get("/api/health", response_model=HealthResponse)
-def health_check(db: Session = Depends(get_db)):
+def health_check(db=Depends(get_db)):
     """Liveness probe: verifies API + database connectivity."""
     try:
-        works_count = db.query(func.count(Work.work_id)).scalar() or 0
+        works_count = works.count_documents({})
         db_status = "connected"
-    except Exception:
+    except PyMongoError:
         works_count = 0
         db_status = "unavailable"
     return HealthResponse(
@@ -682,8 +638,9 @@ def health_check(db: Session = Depends(get_db)):
     )
 
 
-# In the Hugging Face container, FastAPI serves the production React bundle so
-# the API and dashboard share one public origin.
+# In the Docker container (Hugging Face), FastAPI serves the production React
+# bundle so the API and dashboard share one public origin. On Vercel the
+# frontend is served by the static build instead.
 _frontend_dist = settings.DATA_DIR.parent / "frontend" / "dist"
 if _frontend_dist.is_dir():
     app.mount("/", StaticFiles(directory=_frontend_dist, html=True), name="frontend")

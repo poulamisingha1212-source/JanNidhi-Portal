@@ -1,8 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 from backend.main import app
-from backend.database import SessionLocal
-from backend.models import Work
+from backend.database import works
 from backend.config import settings
 
 client = TestClient(app)
@@ -12,14 +11,8 @@ def pytest_configure(config):
     """Portal-only pipeline: if the database is empty (fresh environment),
     seed it from the bundled sample feed via the offline replay path so the
     API tests never depend on the network."""
-    from backend.database import engine, Base
     from backend.services.ingestion import run_ingestion
-    Base.metadata.create_all(bind=engine)
-    db = SessionLocal()
-    try:
-        count = db.query(Work.work_id).count()
-    finally:
-        db.close()
+    count = works.count_documents({})
     if count == 0:
         run_ingestion(mode="auto", source_file_path=settings.RAW_SAMPLE_PATH)
 
