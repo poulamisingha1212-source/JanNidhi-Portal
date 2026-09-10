@@ -3,6 +3,7 @@ import hmac
 import time
 import json
 import base64
+import os
 from typing import Optional
 from fastapi import Header, HTTPException, status
 from backend.config import settings
