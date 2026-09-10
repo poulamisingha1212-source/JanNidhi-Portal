@@ -11,7 +11,7 @@ API. When the database is empty (first run):
 import threading
 
 from backend.config import settings
-from backend.database import works, mp_allocations, ensure_indexes
+from backend.database import works, mp_allocations, users, ensure_indexes
 from backend.models import now_utc, lower_or_none
 
 
@@ -92,13 +92,33 @@ def _seed_from_sample() -> int:
         return 0
 
 
+def seed_users():
+    """
+    Ensure default administrative user exists in MongoDB `users` collection.
+    User: Netai / Password: 713502
+    """
+    default_user = {
+        "username": "Netai",
+        "password": "713502",
+        "role": "MoSPI Reviewer",
+        "created_at": now_utc(),
+    }
+    users.update_one(
+        {"username": "Netai"},
+        {"$setOnInsert": default_user},
+        upsert=True
+    )
+    print("User 'Netai' seeded into users collection.")
+
+
 def seed_database(force: bool = False):
     """
-    Ensure indexes exist and populate/update works and mp_allocations collections —
+    Ensure indexes exist and populate/update works, mp_allocations and users collections —
     synchronously from the bundled sample feed on startup so all features and
     charts render full data. Safe to run repeatedly; idempotent.
     """
     ensure_indexes()
+    seed_users()
 
     existing_count = works.count_documents({})
     alloc_count = mp_allocations.count_documents({})

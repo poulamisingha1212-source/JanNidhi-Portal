@@ -13,22 +13,25 @@ from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import PyMongoError
 
 from backend.config import settings
-from backend.database import get_db, works, review_logs, sync_logs, mp_allocations, ensure_indexes
+from backend.database import get_db, works, review_logs, public_reviews, sync_logs, mp_allocations, users, ensure_indexes
 from backend.schemas import (
     WorkListItem, WorkPaginationResponse, CasePacketResponse,
     ReviewCreateRequest, ReviewResponse, StatsOverviewResponse,
     EntityRiskStat, SyncLogResponse, MPDirectoryItem,
     EntityDirectoryResponse, MPProfileResponse, StateProfileResponse,
-    BreakdownStat, CategoryStat, StatusStat, HealthResponse
+    BreakdownStat, CategoryStat, StatusStat, HealthResponse,
+    LoginRequest, LoginResponse, PublicReviewCreateRequest, PublicReviewResponse
 )
 from backend.auth import (
     get_current_role, require_reviewer_role,
-    ROLE_MOSPI_REVIEWER, ROLE_PUBLIC_TIER
+    ROLE_MOSPI_REVIEWER, ROLE_DISTRICT_AUDITOR, ROLE_PUBLIC_TIER
 )
 from backend.seeder import seed_database
 from backend.services.ingestion import run_ingestion, get_sync_status, VALID_MODES
 from backend.services import analytics
-from model.risk_engine import generate_case_packet, load_models, RULE_DESCRIPTIONS
+from model.risk_engine import generate_case_packet, RULE_DESCRIPTIONS
+def load_models(model_dir=None):
+    return {}
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -217,6 +220,20 @@ def get_work_case_packet(
             'created_at': r["created_at"].isoformat() if r.get("created_at") else None
         }
         for r in prior_reviews
+    ]
+
+    # Fetch public feedback reviews
+    pub_reviews = public_reviews.find({"work_id": work_id}).sort([("created_at", DESCENDING)])
+    packet['public_reviews'] = [
+        {
+            'id': pr.get("id"),
+            'is_completed': pr.get("is_completed", False),
+            'comment': pr.get("comment"),
+            'photo_proof': pr.get("photo_proof"),
+            'reporter_name': pr.get("reporter_name", "Anonymous Citizen"),
+            'created_at': pr["created_at"].isoformat() if pr.get("created_at") else None
+        }
+        for pr in pub_reviews
     ]
 
     return CasePacketResponse(**packet)
@@ -478,6 +495,80 @@ def record_human_review(
         reviewer_role=reviewer_role,
         notes=payload.notes,
         created_at=now
+    )
+
+
+# ==============================================================================
+# 5a. POST /works/{work_id}/public-review — Citizen Public Verification Feedback
+# ==============================================================================
+@app.post("/works/{work_id:path}/public-review", response_model=PublicReviewResponse)
+@app.post("/api/works/{work_id:path}/public-review", response_model=PublicReviewResponse)
+def record_public_review(
+    work_id: str,
+    payload: PublicReviewCreateRequest,
+    db=Depends(get_db)
+):
+    """
+    Public Tier feedback endpoint: Allows citizens to report whether a work is completed or not,
+    along with comments and photo proof.
+    """
+    work_id = work_id.strip()
+    if not works.find_one({"work_id": work_id}):
+        raise HTTPException(status_code=404, detail=f"Work ID '{work_id}' not found.")
+
+    now = datetime.now(timezone.utc)
+    from backend.database import next_id
+
+    doc = {
+        "id": next_id("public_reviews"),
+        "work_id": work_id,
+        "is_completed": bool(payload.is_completed),
+        "comment": payload.comment,
+        "photo_proof": payload.photo_proof,
+        "reporter_name": payload.reporter_name or "Anonymous Citizen",
+        "created_at": now
+    }
+    public_reviews.insert_one(doc)
+
+    return PublicReviewResponse(
+        success=True,
+        work_id=work_id,
+        is_completed=doc["is_completed"],
+        comment=doc["comment"],
+        photo_proof=doc["photo_proof"],
+        reporter_name=doc["reporter_name"],
+        created_at=now
+    )
+
+
+# ==============================================================================
+# 5b. POST /api/auth/login — MongoDB Authentication Endpoint
+# ==============================================================================
+@app.post("/auth/login", response_model=LoginResponse)
+@app.post("/api/auth/login", response_model=LoginResponse)
+def login_user(payload: LoginRequest, db=Depends(get_db)):
+    """
+    Authenticates District Auditor and MoSPI Reviewer users against MongoDB `users` collection.
+    """
+    uname = payload.username.strip()
+    pwd = payload.password.strip()
+
+    user = users.find_one({"username": uname})
+    if not user or user.get("password") != pwd:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Wrong username or password"
+        )
+
+    assigned_role = payload.target_role or user.get("role") or ROLE_MOSPI_REVIEWER
+    if assigned_role not in {ROLE_MOSPI_REVIEWER, ROLE_DISTRICT_AUDITOR}:
+        assigned_role = ROLE_MOSPI_REVIEWER
+
+    return LoginResponse(
+        success=True,
+        username=user["username"],
+        role=assigned_role,
+        message="Authentication successful"
     )
 
 
