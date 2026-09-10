@@ -74,8 +74,8 @@ def get_current_role(
     x_user_role: Optional[str] = Header(default=None)
 ) -> str:
     """
-    Extracts role from verified Authorization token or fallback X-User-Role header.
-    Elevated roles (MoSPI Reviewer, District Auditor) require token or header assertion.
+    Extracts role exclusively from a verified Authorization token.
+    Elevated roles (MoSPI Reviewer, District Auditor) require a valid signed token.
     """
     token = None
     if authorization and authorization.startswith("Bearer "):
