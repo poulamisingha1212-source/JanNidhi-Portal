@@ -144,7 +144,23 @@ def generate_records():
     all_mps = [(m[0], m[1], m[2], "Lok Sabha") for m in MP_NAMES_LOK_SABHA] + \
               [(m[0], m[1], m[2], "Rajya Sabha") for m in MP_NAMES_RAJYA_SABHA]
 
+    # Assign performance profile to each MP for a realistic, varied distribution
+    # ~20% Low/Lagging, ~50% Average/Moderate, ~30% High/Efficient
+    mp_profiles = {}
     for mp_name, state, constituency, house in all_mps:
+        r = random.random()
+        if r < 0.20:
+            profile = "low"      # Target work utilization ~15%-45%
+            alloc = 50000000.0   # ₹5 Cr statutory limit
+        elif r < 0.70:
+            profile = "avg"      # Target work utilization ~45%-75%
+            alloc = 50000000.0   # ₹5 Cr statutory limit
+        else:
+            profile = "high"     # Target work utilization ~75%-95%
+            alloc = 50000000.0   # ₹5 Cr statutory limit
+
+        mp_profiles[mp_name] = profile
+
         records.append({
             "record_type": "MP Allocated Limit",
             "source_file": "mplads_synthetic_feed.csv",
@@ -153,7 +169,7 @@ def generate_records():
             "constituency": constituency,
             "mp_name": mp_name,
             "house": house,
-            "allocated_amount": random.choice([50000000.0, 100000000.0]),
+            "allocated_amount": alloc,
             "recommended_date": "2024-04-01"
         })
         sr_no += 1
@@ -161,24 +177,45 @@ def generate_records():
     # 2. Works generation (~1,500 distinct works)
     num_works = 1500
     for i in range(1, num_works + 1):
-        mp_name, state, constituency, house = random.choice(all_mps)
+        mp_tuple = random.choice(all_mps)
+        mp_name, state, constituency, house = mp_tuple
+        profile = mp_profiles[mp_name]
+
         category = random.choice(WORK_CATEGORIES)
         wtype = random.choice(WORK_TYPES_BY_CAT[category])
         work_id = f"WS/MP{random.randint(100, 999)}/2025-2026/{100000 + i}"
         ida = f"{state.upper()} DISTRICT MAGISTRATE IDA"
 
-        # Amounts
+        # Sanction amounts
         sanc_amount = round(random.uniform(100000, 5000000), -3)
 
         # Inject specific anomaly signals in ~8% of works
         is_cost_outlier = (i % 25 == 0)
         if is_cost_outlier:
-            sanc_amount = 35000000.0  # ₹3.5 Cr cost outlier
+            sanc_amount = 18000000.0  # ₹1.8 Cr cost outlier
 
         rec_date = random_date(2024, 2025)
         sanc_date = rec_date + timedelta(days=random.randint(10, 60))
 
-        status = random.choice(WORK_STATUSES)
+        # Status distribution modulated by MP profile
+        if profile == "low":
+            status = random.choice([
+                "Sanction", "Physical Inspection", "Vendor Identification", "Time Estimation",
+                "Work in Progress", "Work in Progress", "Work Completed"
+            ])
+        elif profile == "avg":
+            status = random.choice([
+                "Sanction", "Physical Inspection",
+                "Work in Progress", "Work in Progress", "Work in Progress",
+                "Work Completed", "Work Completed"
+            ])
+        else: # high
+            status = random.choice([
+                "Vendor Identification",
+                "Work in Progress", "Work in Progress",
+                "Work Completed", "Work Completed", "Work Completed", "Work Completed"
+            ])
+
         vendor = random.choice(VENDORS)
 
         desc = f"{wtype} at {constituency} village ward {random.randint(1, 20)}"
@@ -224,24 +261,30 @@ def generate_records():
         })
         sr_no += 1
 
-        # Generate realistic, imperfect utilization based on work_status
-        # Some works are initial stage (low/0 expenditure), some in progress (20%-70%),
-        # completed works (70%-105%), and occasional low/high outliers.
+        # Generate realistic, imperfect utilization based on MP profile and work_status
         is_completed = (status == "Work Completed")
 
         if status in ["Sanction", "Physical Inspection", "Vendor Identification", "Time Estimation"]:
-            # Early stage works: 0% to 30% expenditure ratio
-            target_util_ratio = random.choice([0.0, 0.0, 0.1, 0.25, 0.35, 0.5])
+            # Early stage works: 0% to 35%
+            target_util_ratio = random.choice([0.0, 0.0, 0.05, 0.15, 0.25, 0.35])
         elif status == "Work in Progress":
-            # Ongoing works: 20% to 80% expenditure ratio
-            target_util_ratio = random.uniform(0.20, 0.85)
+            if profile == "low":
+                target_util_ratio = random.uniform(0.15, 0.45)
+            elif profile == "avg":
+                target_util_ratio = random.uniform(0.35, 0.70)
+            else:
+                target_util_ratio = random.uniform(0.60, 0.88)
         else: # Work Completed
-            # Completed works: 65% to 105% expenditure ratio
-            target_util_ratio = random.uniform(0.65, 1.05)
+            if profile == "low":
+                target_util_ratio = random.uniform(0.50, 0.80)
+            elif profile == "avg":
+                target_util_ratio = random.uniform(0.70, 0.95)
+            else:
+                target_util_ratio = random.uniform(0.85, 1.08)
 
-        # Allow occasional realistic overall anomalies (e.g. stalled or delayed works)
-        if random.random() < 0.15:
-            target_util_ratio = random.choice([0.15, 0.30, 0.45, 0.55])
+        # Allow occasional realistic anomalies (e.g. stalled or over-utilized works)
+        if random.random() < 0.10:
+            target_util_ratio = random.choice([0.10, 0.25, 0.40, 1.12])
 
         if target_util_ratio > 0:
             total_disbursed_target = round(sanc_amount * target_util_ratio, -2)
@@ -312,3 +355,4 @@ if __name__ == "__main__":
             full_r = {col: r.get(col, "") for col in LONG_COLUMNS}
             writer.writerow(full_r)
     print(f"Generated {len(recs)} synthetic records in {filepath}")
+
