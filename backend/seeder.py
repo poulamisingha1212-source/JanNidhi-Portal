@@ -11,7 +11,8 @@ API. When the database is empty (first run):
 import threading
 
 from backend.config import settings
-from backend.database import works, ensure_indexes
+from backend.database import works, mp_allocations, ensure_indexes
+from backend.models import now_utc, lower_or_none
 
 
 def _initial_live_sync():
@@ -24,36 +25,91 @@ def _initial_live_sync():
         print(f"Initial live sync failed: {e}. Use POST /api/sync/run?mode=live to retry.")
 
 
+def _ensure_default_allocations() -> int:
+    """
+    Fallback seeder: if mp_allocations is empty or missing entries for MPs in works,
+    upsert default statutory allocation entries (₹5 Cr per MP per term).
+    """
+    from pymongo import ReplaceOne
+
+    now = now_utc()
+    pipeline = [
+        {"$match": {"mp_name": {"$ne": None, "$exists": True}}},
+        {"$group": {
+            "_id": "$mp_name",
+            "house": {"$first": "$house"},
+            "constituency": {"$first": "$constituency"},
+            "state": {"$first": "$state"},
+        }}
+    ]
+
+    distinct_mps = list(works.aggregate(pipeline))
+    if not distinct_mps:
+        return 0
+
+    ops = []
+    for mp in distinct_mps:
+        mp_name = mp["_id"]
+        house_val = mp.get("house") or "Lok Sabha"
+        constituency_val = mp.get("constituency") or ""
+        state_val = mp.get("state") or ""
+
+        key = dict(
+            mp_name=mp_name,
+            house=house_val,
+            constituency=constituency_val,
+            state=state_val,
+        )
+        doc = {
+            **key,
+            "allocated_amount": 50000000.0,
+            "tenure_start": None,
+            "updated_at": now,
+            "_mp_name_lower": lower_or_none(mp_name),
+        }
+        ops.append(ReplaceOne(key, doc, upsert=True))
+
+    if ops:
+        mp_allocations.bulk_write(ops, ordered=False)
+        print(f"Ensured {len(ops)} MP allocation records in mp_allocations.")
+    return len(ops)
+
+
 def _seed_from_sample() -> int:
     from backend.services.ingestion import run_ingestion
     if not settings.RAW_SAMPLE_PATH.exists():
         print(f"Sample feed not found at {settings.RAW_SAMPLE_PATH}; skipping sample seed.")
+        _ensure_default_allocations()
         return 0
     try:
         result = run_ingestion(mode="auto", source_file_path=settings.RAW_SAMPLE_PATH)
         print(f"Sample seed finished: {result.get('processed', 0)} records processed.")
+        _ensure_default_allocations()
         return int(result.get("processed", 0))
     except Exception as e:
         print(f"Sample seed failed: {e}. Live sync will retry via the scheduler/cron.")
+        _ensure_default_allocations()
         return 0
 
 
 def seed_database(force: bool = False):
     """
-    Ensure indexes exist and populate/update the works collection —
+    Ensure indexes exist and populate/update works and mp_allocations collections —
     synchronously from the bundled sample feed on startup so all features and
     charts render full data. Safe to run repeatedly; idempotent.
     """
     ensure_indexes()
 
     existing_count = works.count_documents({})
-    # If the collection already has >= 1000 records and force is False, keep existing data.
-    if existing_count >= 1000 and not force:
-        print(f"Database already contains {existing_count} records. Bootstrap skipped.")
+    alloc_count = mp_allocations.count_documents({})
+
+    # If both works (>= 1000) and mp_allocations (> 0) contain data and force is False, skip
+    if existing_count >= 1000 and alloc_count > 0 and not force:
+        print(f"Database already contains {existing_count} works and {alloc_count} allocations. Bootstrap skipped.")
         return existing_count
 
-    if settings.SEED_FROM_SAMPLE or existing_count < 1000 or force:
-        print(f"Seeding database with the rich sample feed (current count: {existing_count})...")
+    if settings.SEED_FROM_SAMPLE or existing_count < 1000 or alloc_count == 0 or force:
+        print(f"Seeding database (works: {existing_count}, allocations: {alloc_count})...")
         return _seed_from_sample()
 
     print("Starting initial live sync in the background...")

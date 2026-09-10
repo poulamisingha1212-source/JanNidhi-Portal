@@ -54,7 +54,7 @@ def ensure_indexes() -> None:
          ("constituency", ASCENDING), ("state", ASCENDING)],
         unique=True,
     )
-    mp_allocations.create_index([("mp_name_lower", ASCENDING)])
+    mp_allocations.create_index([("_mp_name_lower", ASCENDING)])
     review_logs.create_index([("work_id", ASCENDING), ("created_at", DESCENDING)])
     sync_logs.create_index([("run_timestamp", DESCENDING)])
 
