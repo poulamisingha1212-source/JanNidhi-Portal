@@ -151,6 +151,10 @@ export default function App() {
   const handleSelectWork = (workId) => {
     setSelectedWorkId(workId);
     setIsLoadingPacket(true);
+    fetchCasePacket(workId);
+  };
+
+  const fetchCasePacket = (workId) => {
     apiFetch(`/api/works/${encodeURIComponent(workId)}`, {
       headers: { 'X-User-Role': currentRole }
     })
@@ -388,6 +392,7 @@ export default function App() {
           currentRole={currentRole}
           onSubmitReview={handleSubmitReview}
           isSubmittingReview={isSubmittingReview}
+          onRefreshPacket={fetchCasePacket}
         />
       )}
 

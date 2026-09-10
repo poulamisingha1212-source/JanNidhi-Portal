@@ -13,14 +13,14 @@ from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import PyMongoError
 
 from backend.config import settings
-from backend.database import get_db, works, review_logs, sync_logs, mp_allocations, users, ensure_indexes
+from backend.database import get_db, works, review_logs, public_reviews, sync_logs, mp_allocations, users, ensure_indexes
 from backend.schemas import (
     WorkListItem, WorkPaginationResponse, CasePacketResponse,
     ReviewCreateRequest, ReviewResponse, StatsOverviewResponse,
     EntityRiskStat, SyncLogResponse, MPDirectoryItem,
     EntityDirectoryResponse, MPProfileResponse, StateProfileResponse,
     BreakdownStat, CategoryStat, StatusStat, HealthResponse,
-    LoginRequest, LoginResponse
+    LoginRequest, LoginResponse, PublicReviewCreateRequest, PublicReviewResponse
 )
 from backend.auth import (
     get_current_role, require_reviewer_role,
@@ -218,6 +218,20 @@ def get_work_case_packet(
             'created_at': r["created_at"].isoformat() if r.get("created_at") else None
         }
         for r in prior_reviews
+    ]
+
+    # Fetch public feedback reviews
+    pub_reviews = public_reviews.find({"work_id": work_id}).sort([("created_at", DESCENDING)])
+    packet['public_reviews'] = [
+        {
+            'id': pr.get("id"),
+            'is_completed': pr.get("is_completed", False),
+            'comment': pr.get("comment"),
+            'photo_proof': pr.get("photo_proof"),
+            'reporter_name': pr.get("reporter_name", "Anonymous Citizen"),
+            'created_at': pr["created_at"].isoformat() if pr.get("created_at") else None
+        }
+        for pr in pub_reviews
     ]
 
     return CasePacketResponse(**packet)
@@ -478,6 +492,49 @@ def record_human_review(
         reviewer_name=reviewer_name,
         reviewer_role=reviewer_role,
         notes=payload.notes,
+        created_at=now
+    )
+
+
+# ==============================================================================
+# 5a. POST /works/{work_id}/public-review — Citizen Public Verification Feedback
+# ==============================================================================
+@app.post("/works/{work_id:path}/public-review", response_model=PublicReviewResponse)
+@app.post("/api/works/{work_id:path}/public-review", response_model=PublicReviewResponse)
+def record_public_review(
+    work_id: str,
+    payload: PublicReviewCreateRequest,
+    db=Depends(get_db)
+):
+    """
+    Public Tier feedback endpoint: Allows citizens to report whether a work is completed or not,
+    along with comments and photo proof.
+    """
+    work_id = work_id.strip()
+    if not works.find_one({"work_id": work_id}):
+        raise HTTPException(status_code=404, detail=f"Work ID '{work_id}' not found.")
+
+    now = datetime.now(timezone.utc)
+    from backend.database import next_id
+
+    doc = {
+        "id": next_id("public_reviews"),
+        "work_id": work_id,
+        "is_completed": bool(payload.is_completed),
+        "comment": payload.comment,
+        "photo_proof": payload.photo_proof,
+        "reporter_name": payload.reporter_name or "Anonymous Citizen",
+        "created_at": now
+    }
+    public_reviews.insert_one(doc)
+
+    return PublicReviewResponse(
+        success=True,
+        work_id=work_id,
+        is_completed=doc["is_completed"],
+        comment=doc["comment"],
+        photo_proof=doc["photo_proof"],
+        reporter_name=doc["reporter_name"],
         created_at=now
     )
 

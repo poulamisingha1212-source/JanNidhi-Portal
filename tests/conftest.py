@@ -54,6 +54,7 @@ if not mongodb_available and mongomock is not None:
     db.works = mock_db["works"]
     db.mp_allocations = mock_db["mp_allocations"]
     db.review_logs = mock_db["review_logs"]
+    db.public_reviews = mock_db["public_reviews"]
     db.users = mock_db["users"]
     db.sync_logs = mock_db["sync_logs"]
     db._counters = mock_db["counters"]
@@ -77,6 +78,7 @@ if not mongodb_available and mongomock is not None:
     main.mp_allocations = mock_db["mp_allocations"]
     main.review_logs = mock_db["review_logs"]
     main.sync_logs = mock_db["sync_logs"]
+    main.public_reviews = mock_db["public_reviews"]
     main.users = mock_db["users"]
 
     import backend.seeder as seeder

@@ -71,6 +71,24 @@ class CasePacketResponse(BaseModel):
     n_vendor_payments: Optional[float] = 0.0
     human_review_outcome: Optional[str] = None
     prior_reviews: List[dict] = []
+    public_reviews: List[dict] = []
+
+
+class PublicReviewCreateRequest(BaseModel):
+    is_completed: bool = Field(..., description="True if work is completed, False if not done")
+    comment: Optional[str] = None
+    photo_proof: Optional[str] = Field(None, description="Base64 encoded image or image URL")
+    reporter_name: Optional[str] = "Anonymous Citizen"
+
+
+class PublicReviewResponse(BaseModel):
+    success: bool
+    work_id: str
+    is_completed: bool
+    comment: Optional[str] = None
+    photo_proof: Optional[str] = None
+    reporter_name: str
+    created_at: datetime
 
 
 class ReviewCreateRequest(BaseModel):

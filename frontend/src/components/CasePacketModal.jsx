@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import {
   ShieldAlert, AlertTriangle, FileCheck,
   Building2, User, MapPin, Layers, Activity, Scale, Send, Loader2,
+  Camera, CheckCircle2, XCircle, MessageSquareText, Image as ImageIcon
 } from 'lucide-react';
 import {
   Dialog, DialogContent, DialogTitle, DialogDescription,
@@ -10,8 +11,10 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Textarea } from '@/components/ui/textarea';
+import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
 import { formatINR } from '@/lib/format';
+import { apiFetch } from '@/lib/api';
 
 const OUTCOMES = [
   { id: 'legitimate', label: 'Legitimate Work', desc: 'Valid docs & progress' },
@@ -27,10 +30,18 @@ export default function CasePacketModal({
   onClose,
   currentRole,
   onSubmitReview,
-  isSubmittingReview
+  isSubmittingReview,
+  onRefreshPacket
 }) {
   const [outcome, setOutcome] = useState('irregularity');
   const [notes, setNotes] = useState('');
+
+  // Public Feedback Form State
+  const [pubIsCompleted, setPubIsCompleted] = useState(true);
+  const [pubComment, setPubComment] = useState('');
+  const [pubReporterName, setPubReporterName] = useState('');
+  const [pubPhotoProof, setPubPhotoProof] = useState('');
+  const [isSubmittingPublicReview, setIsSubmittingPublicReview] = useState(false);
 
   const isPublicTier = currentRole === 'Read-Only Public Tier';
 
@@ -43,6 +54,61 @@ export default function CasePacketModal({
       toast.success('Audit review outcome recorded successfully.');
     } else {
       toast.error('Review submission failed. Check your role and try again.');
+    }
+  };
+
+  // Convert uploaded image to Base64
+  const handlePhotoUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('File size exceeds 5MB limit.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setPubPhotoProof(reader.result);
+      toast.success('Photo attached successfully.');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handlePublicReviewSubmit = async (e) => {
+    e.preventDefault();
+    setIsSubmittingPublicReview(true);
+
+    try {
+      const res = await apiFetch(`/api/works/${encodeURIComponent(packet.work_id)}/public-review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          is_completed: pubIsCompleted,
+          comment: pubComment.trim() || 'Citizen ground verification',
+          photo_proof: pubPhotoProof || null,
+          reporter_name: pubReporterName.trim() || 'Anonymous Citizen',
+        }),
+      });
+
+      if (!res.ok) {
+        toast.error('Failed to submit public verification.');
+        setIsSubmittingPublicReview(false);
+        return;
+      }
+
+      toast.success('Thank you! Your public work verification has been submitted.');
+      setPubComment('');
+      setPubPhotoProof('');
+      setIsSubmittingPublicReview(false);
+
+      if (onRefreshPacket) {
+        onRefreshPacket(packet.work_id);
+      }
+    } catch (err) {
+      console.error('Public review error:', err);
+      toast.error('Error submitting feedback. Please try again.');
+      setIsSubmittingPublicReview(false);
     }
   };
 
@@ -192,24 +258,184 @@ export default function CasePacketModal({
               )}
             </div>
 
-            {/* Human review feedback loop */}
-            <div className="p-5 rounded-2xl bg-gradient-to-br from-background via-background to-primary/10 border space-y-4">
-              <div className="flex items-center justify-between">
+            {/* Public Citizen Verification Form (Public Tier Option) */}
+            {isPublicTier ? (
+              <div className="p-5 rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200/80 dark:border-indigo-900 space-y-4">
                 <div className="flex items-center gap-2">
-                  <FileCheck className="w-5 h-5 text-primary" />
-                  <h3 className="text-sm font-bold">Human Auditor Review & Decision Record</h3>
+                  <Camera className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">Public Citizen Verification</h3>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Verify whether this ground work is completed or incomplete, and attach photo proof for MoSPI auditors.
+                    </p>
+                  </div>
                 </div>
-                <span className="text-[11px] font-medium text-muted-foreground">
-                  Active Role: <strong className="text-primary">{currentRole}</strong>
-                </span>
-              </div>
 
-              {isPublicTier ? (
-                <div className="p-3.5 rounded-xl bg-muted/60 border text-xs text-muted-foreground">
-                  <span className="font-semibold text-amber-700 block mb-1">Access Restricted (Read-Only Public Tier)</span>
-                  Public visitors can inspect case packets and risk scores, but cannot submit or modify official audit determinations. Switch to <strong>MoSPI Reviewer</strong> or <strong>District Auditor</strong> role to record findings.
+                <form onSubmit={handlePublicReviewSubmit} className="space-y-3 text-xs">
+
+                  {/* Status Selection Buttons */}
+                  <div>
+                    <label className="text-slate-700 dark:text-slate-300 font-semibold block mb-1.5">
+                      Work Completion Status:
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setPubIsCompleted(true)}
+                        className={`flex-1 p-2.5 rounded-xl border flex items-center justify-center gap-2 font-bold text-xs transition-all cursor-pointer ${
+                          pubIsCompleted
+                            ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                            : 'bg-white dark:bg-slate-900 border-slate-200 text-slate-600 hover:border-emerald-300'
+                        }`}
+                      >
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>Work Completed</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setPubIsCompleted(false)}
+                        className={`flex-1 p-2.5 rounded-xl border flex items-center justify-center gap-2 font-bold text-xs transition-all cursor-pointer ${
+                          !pubIsCompleted
+                            ? 'bg-rose-600 text-white border-rose-600 shadow-xs'
+                            : 'bg-white dark:bg-slate-900 border-slate-200 text-slate-600 hover:border-rose-300'
+                        }`}
+                      >
+                        <XCircle className="w-4 h-4" />
+                        <span>Work Not Done</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Comments */}
+                  <div>
+                    <label className="text-slate-700 dark:text-slate-300 font-semibold block mb-1">
+                      Verification Remarks / Ground Feedback:
+                    </label>
+                    <Textarea
+                      rows={2}
+                      value={pubComment}
+                      onChange={(e) => setPubComment(e.target.value)}
+                      placeholder="Specify ground observation details (e.g. site location, visible progress, missing materials)..."
+                      className="bg-white dark:bg-slate-900 text-xs rounded-xl"
+                    />
+                  </div>
+
+                  {/* Photo Proof Upload */}
+                  <div>
+                    <label className="text-slate-700 dark:text-slate-300 font-semibold block mb-1">
+                      Attach Photo Proof (Image File or Capture):
+                    </label>
+                    <div className="flex items-center gap-3">
+                      <Input
+                        type="file"
+                        accept="image/*"
+                        onChange={handlePhotoUpload}
+                        className="bg-white dark:bg-slate-900 text-xs rounded-xl cursor-pointer"
+                      />
+                      {pubPhotoProof && (
+                        <div className="flex items-center gap-1.5 text-xs text-emerald-600 font-semibold shrink-0">
+                          <ImageIcon className="w-4 h-4" />
+                          <span>Photo Attached</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Reporter Name (Optional) */}
+                  <div>
+                    <label className="text-slate-700 dark:text-slate-300 font-semibold block mb-1">
+                      Your Name / Designation (Optional):
+                    </label>
+                    <Input
+                      type="text"
+                      placeholder="e.g. Local Resident / Ward Member"
+                      value={pubReporterName}
+                      onChange={(e) => setPubReporterName(e.target.value)}
+                      className="bg-white dark:bg-slate-900 text-xs rounded-xl"
+                    />
+                  </div>
+
+                  {/* Submit Button */}
+                  <div className="pt-1 flex justify-end">
+                    <Button
+                      type="submit"
+                      size="sm"
+                      disabled={isSubmittingPublicReview}
+                      className="h-9 px-5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white gap-2 cursor-pointer"
+                    >
+                      {isSubmittingPublicReview ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                      <span>{isSubmittingPublicReview ? 'Submitting...' : 'Submit Verification'}</span>
+                    </Button>
+                  </div>
+
+                </form>
+              </div>
+            ) : null}
+
+            {/* Public Reviews Section (Visible to MoSPI Reviewers, District Auditors, and Public) */}
+            {packet.public_reviews && packet.public_reviews.length > 0 && (
+              <div className="p-5 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <MessageSquareText className="w-4 h-4 text-indigo-600" />
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                      Public Citizen Verification Feedback ({packet.public_reviews.length})
+                    </h3>
+                  </div>
+                  <span className="text-[11px] text-slate-500">Field reporting by local citizens</span>
                 </div>
-              ) : (
+
+                <div className="space-y-3">
+                  {packet.public_reviews.map((rev) => (
+                    <div key={rev.id} className="p-3.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          {rev.is_completed ? (
+                            <span className="inline-flex items-center gap-1 text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md font-bold text-[11px]">
+                              <CheckCircle2 className="w-3 h-3" /> Work Done
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-md font-bold text-[11px]">
+                              <XCircle className="w-3 h-3" /> Work Not Done
+                            </span>
+                          )}
+                          <span className="font-semibold text-slate-800 dark:text-slate-200">{rev.reporter_name}</span>
+                        </div>
+                        <span className="text-[10px] text-slate-400">{new Date(rev.created_at).toLocaleDateString()}</span>
+                      </div>
+
+                      <p className="text-slate-600 dark:text-slate-300 leading-relaxed pl-1">{rev.comment}</p>
+
+                      {rev.photo_proof && (
+                        <div className="pt-1">
+                          <span className="text-[10px] font-semibold text-slate-400 block mb-1">Attached Photo Proof:</span>
+                          <img
+                            src={rev.photo_proof}
+                            alt="Public photo proof"
+                            className="max-h-48 w-auto rounded-lg border border-slate-200 object-cover shadow-2xs"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Human review feedback loop (MoSPI Reviewer & Auditor Role) */}
+            {!isPublicTier && (
+              <div className="p-5 rounded-2xl bg-gradient-to-br from-background via-background to-primary/10 border space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <FileCheck className="w-5 h-5 text-primary" />
+                    <h3 className="text-sm font-bold">Human Auditor Review & Decision Record</h3>
+                  </div>
+                  <span className="text-[11px] font-medium text-muted-foreground">
+                    Active Role: <strong className="text-primary">{currentRole}</strong>
+                  </span>
+                </div>
+
                 <form onSubmit={handleReviewSubmit} className="space-y-4 text-xs">
 
                   <div>
@@ -222,7 +448,7 @@ export default function CasePacketModal({
                           key={item.id}
                           type="button"
                           onClick={() => setOutcome(item.id)}
-                          className={`p-2.5 rounded-xl text-left border transition-all ${
+                          className={`p-2.5 rounded-xl text-left border transition-all cursor-pointer ${
                             outcome === item.id
                               ? 'bg-primary/10 border-primary text-primary shadow-sm'
                               : 'bg-background/60 text-muted-foreground hover:border-border'
@@ -260,31 +486,31 @@ export default function CasePacketModal({
                   </div>
 
                 </form>
-              )}
 
-              {/* Prior reviews audit trail */}
-              {packet.prior_reviews && packet.prior_reviews.length > 0 && (
-                <div className="pt-3 border-t space-y-2">
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground block">
-                    Recorded Review History ({packet.prior_reviews.length})
-                  </span>
-                  <div className="space-y-1.5">
-                    {packet.prior_reviews.map((rev) => (
-                      <div key={rev.id} className="p-2.5 rounded-xl bg-background/60 border text-xs flex items-start justify-between gap-4">
-                        <div className="space-y-0.5">
-                          <span className="font-semibold text-primary capitalize">{rev.outcome}</span>
-                          <p className="text-muted-foreground text-[11px]">{rev.notes || 'No comments attached.'}</p>
+                {/* Prior reviews audit trail */}
+                {packet.prior_reviews && packet.prior_reviews.length > 0 && (
+                  <div className="pt-3 border-t space-y-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground block">
+                      Recorded Review History ({packet.prior_reviews.length})
+                    </span>
+                    <div className="space-y-1.5">
+                      {packet.prior_reviews.map((rev) => (
+                        <div key={rev.id} className="p-2.5 rounded-xl bg-background/60 border text-xs flex items-start justify-between gap-4">
+                          <div className="space-y-0.5">
+                            <span className="font-semibold text-primary capitalize">{rev.outcome}</span>
+                            <p className="text-muted-foreground text-[11px]">{rev.notes || 'No comments attached.'}</p>
+                          </div>
+                          <div className="text-right text-[10px] text-muted-foreground shrink-0">
+                            <span className="block font-medium text-foreground/70">{rev.reviewer_name}</span>
+                            <span>{new Date(rev.created_at).toLocaleDateString()}</span>
+                          </div>
                         </div>
-                        <div className="text-right text-[10px] text-muted-foreground shrink-0">
-                          <span className="block font-medium text-foreground/70">{rev.reviewer_name}</span>
-                          <span>{new Date(rev.created_at).toLocaleDateString()}</span>
-                        </div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
-            </div>
+                )}
+              </div>
+            )}
 
           </div>
         )}
