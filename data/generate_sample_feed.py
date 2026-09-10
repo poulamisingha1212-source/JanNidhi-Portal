@@ -224,62 +224,80 @@ def generate_records():
         })
         sr_no += 1
 
-        # Record 3: Works Completed (if completed or in progress with progress)
-        is_completed = (status == "Work Completed") or (random.random() < 0.6)
-        if is_completed:
-            comp_date = sanc_date + timedelta(days=random.randint(15, 180))
-            disbursed = round(sanc_amount * random.uniform(0.9, 1.05), -2)
-            has_image = random.choice(["Yes", "Yes", "Yes", "No"])
+        # Generate realistic, imperfect utilization based on work_status
+        # Some works are initial stage (low/0 expenditure), some in progress (20%-70%),
+        # completed works (70%-105%), and occasional low/high outliers.
+        is_completed = (status == "Work Completed")
 
-            records.append({
-                "record_type": "Works Completed",
-                "source_file": "mplads_synthetic_feed.csv",
-                "source_sr_no": sr_no,
-                "state": state,
-                "constituency": constituency,
-                "mp_name": mp_name,
-                "house": house,
-                "ida": ida,
-                "work_id": work_id,
-                "work_category": category,
-                "work_type": wtype,
-                "work_description": desc,
-                "completion_date": comp_date.strftime("%Y-%m-%d"),
-                "amount_disbursed": disbursed,
-                "image_marker": has_image,
-            })
-            sr_no += 1
+        if status in ["Sanction", "Physical Inspection", "Vendor Identification", "Time Estimation"]:
+            # Early stage works: 0% to 30% expenditure ratio
+            target_util_ratio = random.choice([0.0, 0.0, 0.1, 0.25, 0.35, 0.5])
+        elif status == "Work in Progress":
+            # Ongoing works: 20% to 80% expenditure ratio
+            target_util_ratio = random.uniform(0.20, 0.85)
+        else: # Work Completed
+            # Completed works: 65% to 105% expenditure ratio
+            target_util_ratio = random.uniform(0.65, 1.05)
 
-        # Record 4: Expenditure Vouchers (1 to 3 payments per work)
-        n_payments = random.randint(1, 3)
-        payment_total = 0.0
-        for p in range(n_payments):
-            exp_date = sanc_date + timedelta(days=random.randint(10, 120))
-            p_amount = round((sanc_amount / n_payments) * random.uniform(0.95, 1.0), -2)
-            payment_total += p_amount
-            p_status = "Payment Released" if is_completed else "Payment In-Progress"
+        # Allow occasional realistic overall anomalies (e.g. stalled or delayed works)
+        if random.random() < 0.15:
+            target_util_ratio = random.choice([0.15, 0.30, 0.45, 0.55])
 
-            # Missing vendor signal in ~3% of expenditures
-            p_vendor = vendor if (i % 33 != 0) else None
+        if target_util_ratio > 0:
+            total_disbursed_target = round(sanc_amount * target_util_ratio, -2)
+            n_payments = random.randint(1, 3)
 
-            records.append({
-                "record_type": "Expenditure on Completed & On-going Works",
-                "source_file": "mplads_synthetic_feed.csv",
-                "source_sr_no": sr_no,
-                "state": state,
-                "constituency": constituency,
-                "mp_name": mp_name,
-                "house": house,
-                "ida": ida,
-                "work_id": work_id,
-                "work_type": wtype,
-                "work_description": desc,
-                "expenditure_date": exp_date.strftime("%Y-%m-%d"),
-                "fund_disbursed_amount": p_amount,
-                "payment_status": p_status,
-                "vendor_name": p_vendor,
-            })
-            sr_no += 1
+            if is_completed or random.random() < 0.7:
+                comp_date = sanc_date + timedelta(days=random.randint(15, 180))
+                has_image = random.choice(["Yes", "Yes", "Yes", "No"])
+
+                records.append({
+                    "record_type": "Works Completed",
+                    "source_file": "mplads_synthetic_feed.csv",
+                    "source_sr_no": sr_no,
+                    "state": state,
+                    "constituency": constituency,
+                    "mp_name": mp_name,
+                    "house": house,
+                    "ida": ida,
+                    "work_id": work_id,
+                    "work_category": category,
+                    "work_type": wtype,
+                    "work_description": desc,
+                    "completion_date": comp_date.strftime("%Y-%m-%d"),
+                    "amount_disbursed": total_disbursed_target,
+                    "image_marker": has_image,
+                })
+                sr_no += 1
+
+            payment_total = 0.0
+            for p in range(n_payments):
+                exp_date = sanc_date + timedelta(days=random.randint(10, 120))
+                p_amount = round(total_disbursed_target / n_payments, -2)
+                payment_total += p_amount
+                p_status = "Payment Released" if is_completed else "Payment In-Progress"
+
+                # Missing vendor signal in ~3% of expenditures
+                p_vendor = vendor if (i % 33 != 0) else None
+
+                records.append({
+                    "record_type": "Expenditure on Completed & On-going Works",
+                    "source_file": "mplads_synthetic_feed.csv",
+                    "source_sr_no": sr_no,
+                    "state": state,
+                    "constituency": constituency,
+                    "mp_name": mp_name,
+                    "house": house,
+                    "ida": ida,
+                    "work_id": work_id,
+                    "work_type": wtype,
+                    "work_description": desc,
+                    "expenditure_date": exp_date.strftime("%Y-%m-%d"),
+                    "fund_disbursed_amount": p_amount,
+                    "payment_status": p_status,
+                    "vendor_name": p_vendor,
+                })
+                sr_no += 1
 
     return records
 
