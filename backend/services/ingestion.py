@@ -322,6 +322,7 @@ def run_ingestion(mode: str = "auto", source_file_path: Path = None) -> dict:
             df = pd.read_csv(source_file_path)
             scored = score_dataset(_reshape_long_format(df), model_dir=settings.MODEL_DIR)
             counts = _upsert_dataframe(scored)
+            counts["allocations"] = _upsert_allocations(df)
             counts["fetched"] = len(df)
             label = f"Ingestion Feed (file: {Path(source_file_path).name})"
             _log_sync(source=label, status="success", start_dt=start_dt, counts=counts)
