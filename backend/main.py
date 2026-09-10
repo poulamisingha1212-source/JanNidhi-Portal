@@ -29,7 +29,9 @@ from backend.auth import (
 from backend.seeder import seed_database
 from backend.services.ingestion import run_ingestion, get_sync_status, VALID_MODES
 from backend.services import analytics
-from model.risk_engine import generate_case_packet, load_models, RULE_DESCRIPTIONS
+from model.risk_engine import generate_case_packet, RULE_DESCRIPTIONS
+def load_models(model_dir=None):
+    return {}
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
