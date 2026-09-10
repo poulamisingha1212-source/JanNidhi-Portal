@@ -15,7 +15,9 @@ VALID_ROLES = {ROLE_MOSPI_REVIEWER, ROLE_DISTRICT_AUDITOR, ROLE_PUBLIC_TIER}
 DEFAULT_ROLE = ROLE_PUBLIC_TIER
 
 # HMAC Secret key for signing tokens
-SECRET_KEY = getattr(settings, 'SECRET_KEY', 'mplads_jan_nidhi_secret_key_2026')
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY environment variable must be set")
 
 
 def hash_password(password: str) -> str:
