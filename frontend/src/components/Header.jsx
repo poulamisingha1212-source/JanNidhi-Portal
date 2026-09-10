@@ -1,8 +1,9 @@
 import React from 'react';
 import {
-  UserCheck, Landmark, ShieldAlert,
+  UserCheck, Landmark, ShieldAlert, RefreshCw,
   LayoutDashboard, ListChecks, Users, MapPin, Scale,
 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
@@ -24,8 +25,8 @@ export default function Header({
   currentRole,
   setCurrentRole,
   syncStatus,
-  _onTriggerSync,
-  _isSyncing,
+  onTriggerSync,
+  isSyncing,
   house,
   setHouse,
 }) {
@@ -97,6 +98,20 @@ export default function Header({
               </SelectContent>
             </Select>
 
+            {/* Live Sync Action Button */}
+            {currentRole === 'MoSPI Reviewer' && onTriggerSync && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onTriggerSync('live')}
+                disabled={isSyncing}
+                className="h-9 px-3 rounded-xl border-indigo-200 bg-indigo-50/80 text-indigo-700 hover:bg-indigo-100 hover:text-indigo-800 text-xs font-semibold shadow-2xs gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                <span>{isSyncing ? 'Syncing...' : 'Sync Live Data'}</span>
+              </Button>
+            )}
+
             {/* Live Data Freshness Capsule */}
             <Tooltip>
               <TooltipTrigger asChild>
@@ -163,6 +178,19 @@ export default function Header({
                   <SelectItem value="Read-Only Public Tier" className="text-xs">Public Tier</SelectItem>
                 </SelectContent>
               </Select>
+
+              {currentRole === 'MoSPI Reviewer' && onTriggerSync && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => onTriggerSync('live')}
+                  disabled={isSyncing}
+                  className="h-8 px-2.5 rounded-lg border-indigo-200 bg-indigo-50 text-indigo-700 text-xs font-semibold gap-1"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} />
+                  <span>{isSyncing ? 'Syncing...' : 'Sync'}</span>
+                </Button>
+              )}
             </div>
           </div>
 
