@@ -1,8 +1,9 @@
 import React from 'react';
 import {
-  UserCheck, Landmark, ShieldAlert,
+  UserCheck, Landmark, ShieldAlert, RefreshCw,
   LayoutDashboard, ListChecks, Users, MapPin, Scale,
 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
@@ -24,8 +25,8 @@ export default function Header({
   currentRole,
   setCurrentRole,
   syncStatus,
-  _onTriggerSync,
-  _isSyncing,
+  onTriggerSync,
+  isSyncing,
   house,
   setHouse,
 }) {
@@ -34,55 +35,7 @@ export default function Header({
       <header className="glass-panel border-b sticky top-0 z-40 px-4 sm:px-6 py-2.5 transition-all">
         <div className="max-w-7xl mx-auto flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 lg:gap-4">
           
-          {/* Top Row on mobile, Left on desktop: Brand Identity */}
-          <div className="flex items-center justify-between min-w-0 w-full lg:w-auto">
-            <div className="flex items-center gap-2 sm:gap-3 shrink-0 select-none min-w-0">
-              <img
-                src="/brand/jannidhi-brand.png"
-                alt="JanNidhi brand logo"
-                className="h-14 w-auto sm:h-18 lg:h-22 drop-shadow-[0_6px_16px_rgba(15,23,42,0.18)]"
-              />
-            </div>
-
-            {/* Compact Mobile Quick-Status (< lg only) */}
-            <div className="flex lg:hidden items-center gap-2 shrink-0">
-              <div
-                className={`h-7 px-2 rounded-lg border text-[11px] font-medium inline-flex items-center gap-1.5 ${
-                  syncStatus?.is_data_stale
-                    ? 'border-amber-200 bg-amber-50 text-amber-800'
-                    : 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                }`}
-              >
-                <span className={`w-1.5 h-1.5 rounded-full ${syncStatus?.is_data_stale ? 'bg-amber-500' : 'bg-emerald-500 animate-pulse'}`} />
-                <span>{syncStatus?.is_data_stale ? 'Stale' : 'Live'}</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Center Section: Navigation Tabs (Inline on desktop, centered on mobile/tablet) */}
-          <nav className="flex items-center justify-center gap-1 bg-slate-100/90 dark:bg-muted/60 border border-slate-200/80 dark:border-border/80 p-1 rounded-xl shadow-2xs overflow-x-auto max-w-full mx-auto lg:mx-0">
-            {NAV_TABS.map((tab) => {
-              const Icon = tab.icon;
-              const isActive = activeTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`flex items-center gap-1.5 h-8 px-3.5 rounded-lg text-xs font-semibold transition-all duration-150 whitespace-nowrap cursor-pointer select-none ${
-                    isActive
-                      ? 'bg-primary text-primary-foreground shadow-xs shadow-primary/25'
-                      : 'text-slate-600 dark:text-muted-foreground hover:text-slate-900 dark:hover:text-foreground hover:bg-white/80 dark:hover:bg-accent/50'
-                  }`}
-                >
-                  <Icon className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-primary-foreground' : 'text-slate-500'}`} />
-                  <span>{tab.label}</span>
-                </button>
-              );
-            })}
-          </nav>
-
-          {/* Right Section: Controls Cluster on Desktop (Aligned heights and clean spacing) */}
+          {/* Left Section: Controls & Scope Cluster on Desktop */}
           <div className="hidden lg:flex items-center gap-2 shrink-0">
             {/* House Scope Filter */}
             <Select value={house || "ALL"} onValueChange={(v) => setHouse(v === "ALL" ? '' : v)}>
@@ -90,12 +43,26 @@ export default function Header({
                 <Landmark className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent align="end" className="rounded-xl shadow-lg border-slate-200/80">
+              <SelectContent align="start" className="rounded-xl shadow-lg border-slate-200/80">
                 <SelectItem value="ALL" className="text-xs cursor-pointer">Both Houses</SelectItem>
                 <SelectItem value="Lok Sabha" className="text-xs cursor-pointer">Lok Sabha</SelectItem>
                 <SelectItem value="Rajya Sabha" className="text-xs cursor-pointer">Rajya Sabha</SelectItem>
               </SelectContent>
             </Select>
+
+            {/* Live Sync Action Button */}
+            {currentRole === 'MoSPI Reviewer' && onTriggerSync && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onTriggerSync('live')}
+                disabled={isSyncing}
+                className="h-9 px-3 rounded-xl border-indigo-200 bg-indigo-50/80 text-indigo-700 hover:bg-indigo-100 hover:text-indigo-800 text-xs font-semibold shadow-2xs gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin' : ''}`} />
+                <span>{isSyncing ? 'Syncing...' : 'Sync Live Data'}</span>
+              </Button>
+            )}
 
             {/* Live Data Freshness Capsule */}
             <Tooltip>
@@ -129,12 +96,60 @@ export default function Header({
                 <UserCheck className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent align="end" className="rounded-xl shadow-lg border-slate-200/80">
+              <SelectContent align="start" className="rounded-xl shadow-lg border-slate-200/80">
                 <SelectItem value="MoSPI Reviewer" className="text-xs cursor-pointer">MoSPI Reviewer (Admin)</SelectItem>
                 <SelectItem value="District Authority Auditor" className="text-xs cursor-pointer">District Auditor</SelectItem>
                 <SelectItem value="Read-Only Public Tier" className="text-xs cursor-pointer">Public Tier (Read-Only)</SelectItem>
               </SelectContent>
             </Select>
+          </div>
+
+          {/* Center Section: Navigation Tabs */}
+          <nav className="flex items-center justify-center gap-1 bg-slate-100/90 dark:bg-muted/60 border border-slate-200/80 dark:border-border/80 p-1 rounded-xl shadow-2xs overflow-x-auto max-w-full mx-auto">
+            {NAV_TABS.map((tab) => {
+              const Icon = tab.icon;
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`flex items-center gap-1.5 h-8 px-3.5 rounded-lg text-xs font-semibold transition-all duration-150 whitespace-nowrap cursor-pointer select-none ${
+                    isActive
+                      ? 'bg-primary text-primary-foreground shadow-xs shadow-primary/25'
+                      : 'text-slate-600 dark:text-muted-foreground hover:text-slate-900 dark:hover:text-foreground hover:bg-white/80 dark:hover:bg-accent/50'
+                  }`}
+                >
+                  <Icon className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-primary-foreground' : 'text-slate-500'}`} />
+                  <span>{tab.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+
+          {/* Right Section on desktop / Top Row on mobile: Brand Logo Shifted Right */}
+          <div className="flex items-center justify-between lg:justify-end min-w-0 w-full lg:w-auto order-first lg:order-last">
+            <div className="flex items-center gap-2 sm:gap-3 shrink-0 select-none min-w-0">
+              <img
+                src="/brand/jannidhi-brand.png"
+                alt="JanNidhi brand logo"
+                className="h-10 sm:h-12 w-auto drop-shadow-sm object-contain"
+              />
+            </div>
+
+            {/* Compact Mobile Quick-Status (< lg only) */}
+            <div className="flex lg:hidden items-center gap-2 shrink-0">
+              <div
+                className={`h-7 px-2 rounded-lg border text-[11px] font-medium inline-flex items-center gap-1.5 ${
+                  syncStatus?.is_data_stale
+                    ? 'border-amber-200 bg-amber-50 text-amber-800'
+                    : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                }`}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full ${syncStatus?.is_data_stale ? 'bg-amber-500' : 'bg-emerald-500 animate-pulse'}`} />
+                <span>{syncStatus?.is_data_stale ? 'Stale' : 'Live'}</span>
+              </div>
+            </div>
           </div>
 
           {/* Mobile Secondary Controls Bar (< lg only) */}
@@ -163,6 +178,19 @@ export default function Header({
                   <SelectItem value="Read-Only Public Tier" className="text-xs">Public Tier</SelectItem>
                 </SelectContent>
               </Select>
+
+              {currentRole === 'MoSPI Reviewer' && onTriggerSync && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => onTriggerSync('live')}
+                  disabled={isSyncing}
+                  className="h-8 px-2.5 rounded-lg border-indigo-200 bg-indigo-50 text-indigo-700 text-xs font-semibold gap-1"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} />
+                  <span>{isSyncing ? 'Syncing...' : 'Sync'}</span>
+                </Button>
+              )}
             </div>
           </div>
 

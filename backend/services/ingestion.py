@@ -330,27 +330,34 @@ def run_ingestion(mode: str = "auto", source_file_path: Path = None) -> dict:
 
         # ---- Live MPLADS dashboard API ------------------------------------
         try:
+            import gc
             from backend.services.mplads_live import fetch_live_long_dataframe
             raw = fetch_live_long_dataframe(houses=settings.MPLADS_LIVE_HOUSE)
 
-            # Cache the raw long feed so models can be retrained and the
-            # dataset re-scored offline without re-fetching from the portal.
+            # Cache raw feed selectively
             try:
                 cache_path = settings.DATA_DIR / "last_live_feed.csv"
                 raw.to_csv(cache_path, index=False)
-                print(f"Raw feed cached to {cache_path.name} ({len(raw)} rows)")
-            except Exception as ce:
-                print(f"Feed caching skipped: {ce}")
+            except Exception:
+                pass
 
             alloc_map = {
                 a["mp_name"]: a.get("allocated_amount") or 0.0
                 for a in mp_allocations.find({}, {"mp_name": 1, "allocated_amount": 1})
             }
-            scored = score_dataset(_reshape_long_format(raw.copy()), model_dir=settings.MODEL_DIR,
-                                   mp_allocations=alloc_map)
+
+            reshaped = _reshape_long_format(raw)
+            scored = score_dataset(reshaped, model_dir=settings.MODEL_DIR, mp_allocations=alloc_map)
+            del reshaped
+            gc.collect()
+
             counts = _upsert_dataframe(scored)
             counts["allocations"] = _upsert_allocations(raw)
             counts["fetched"] = len(raw)
+
+            del raw, scored
+            gc.collect()
+
             _log_sync(source=SOURCE_LIVE, status="success",
                       start_dt=start_dt, counts=counts)
             return {"status": "success", "mode": "live", "source": SOURCE_LIVE,

@@ -61,10 +61,9 @@ class Settings:
     # in-process scheduler and the startup live-sync thread must not run.
     IS_SERVERLESS: bool = os.getenv("VERCEL") == "1" or os.getenv("IS_SERVERLESS") == "1"
 
-    # When empty and SEED_FROM_SAMPLE=1, first boot ingests the bundled
-    # sample CSV synchronously so a fresh deployment shows data immediately;
-    # scheduled live syncs then replace it with real portal data.
-    SEED_FROM_SAMPLE: bool = os.getenv("SEED_FROM_SAMPLE", "").lower() in {"1", "true", "yes"}
+    # On first boot with an empty database, ingest the bundled sample CSV
+    # so the deployment shows rich data immediately (fast, memory-friendly).
+    SEED_FROM_SAMPLE: bool = os.getenv("SEED_FROM_SAMPLE", "1").lower() in {"1", "true", "yes"}
 
     # Vercel Cron authenticates with `Authorization: Bearer $CRON_SECRET`
     # (the env var of this exact name). Also accepted as X-Cron-Secret.
@@ -77,7 +76,7 @@ class Settings:
     # lok_sabha_18 | both. rajya_sabha keeps scheduled syncs fast; "both"
     # pulls the ~90 MB Lok Sabha payloads.
     MPLADS_BASE_URL: str = os.getenv("MPLADS_BASE_URL", "https://mplads.mospi.gov.in")
-    MPLADS_LIVE_HOUSE: str = os.getenv("MPLADS_LIVE_HOUSE", "both")
+    MPLADS_LIVE_HOUSE: str = os.getenv("MPLADS_LIVE_HOUSE", "rajya_sabha")
     MPLADS_LIVE_TIMEOUT: int = int(os.getenv("MPLADS_LIVE_TIMEOUT", "300"))
 
 settings = Settings()

@@ -42,18 +42,18 @@ async def lifespan(app: FastAPI):
     seed_database()
 
     if not settings.IS_SERVERLESS:
-        # Nightly live sync at 01:00 Indian Standard Time. Serverless
-        # platforms freeze the process between requests, so there the sync
-        # is invoked by the platform cron (GET /api/cron/sync) instead.
+        # Daily live sync at 19:00 Indian Standard Time (7:00 PM IST).
+        # Serverless platforms freeze the process between requests, so there
+        # the sync is invoked by the platform cron (GET /api/cron/sync) instead.
         scheduler.add_job(
             run_ingestion,
-            CronTrigger(hour=1, minute=0, timezone="Asia/Kolkata"),
+            CronTrigger(hour=19, minute=0, timezone="Asia/Kolkata"),
             kwargs={"mode": "live"},
-            id="nightly_mplads_sync",
+            id="daily_mplads_sync",
             replace_existing=True,
         )
         scheduler.start()
-        print("APScheduler started: nightly MPLADS sync at 01:00 IST.")
+        print("APScheduler started: daily MPLADS sync at 19:00 IST (7:00 PM IST).")
 
     yield
 
