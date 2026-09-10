@@ -9,11 +9,16 @@ try:
     from mongomock.aggregate import _Parser
 
     _orig_add_replace = BulkOperationBuilder.add_replace
+    _orig_add_update = BulkOperationBuilder.add_update
 
     def _patched_add_replace(self, selector, replacement, upsert=False, collation=None, hint=None, sort=None):
         return _orig_add_replace(self, selector, replacement, upsert=upsert, collation=collation, hint=hint)
 
+    def _patched_add_update(self, selector, update, upsert=False, multi=False, collation=None, array_filters=None, hint=None, sort=None):
+        return _orig_add_update(self, selector, update, upsert=upsert, multi=multi, collation=collation, array_filters=array_filters, hint=hint)
+
     BulkOperationBuilder.add_replace = _patched_add_replace
+    BulkOperationBuilder.add_update = _patched_add_update
 
     _orig_handle_set = _Parser._handle_set_operator
 
