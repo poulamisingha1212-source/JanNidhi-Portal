@@ -88,8 +88,8 @@ def get_current_role(
         if payload and payload.get("role") in VALID_ROLES:
             return payload["role"]
 
-    if x_user_role and x_user_role.strip() in VALID_ROLES:
-        return x_user_role.strip()
+    # Elevated roles require a valid signed token; the raw header must not
+    # be trusted as a source of authorization.
 
     # Fallback to public tier if no token or invalid token
     return DEFAULT_ROLE
