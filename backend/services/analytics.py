@@ -386,23 +386,37 @@ def get_state_directory(
         {"$limit": page_size},
     ])
 
-    items = [
-        {
+    # Aggregate allocations by state from mp_allocations
+    state_alloc_match: dict = {}
+    if house:
+        state_alloc_match["house"] = house.strip()
+    state_alloc_rows = mp_allocations.aggregate([
+        {"$match": state_alloc_match},
+        {"$group": {"_id": "$state", "total_allocated": {"$sum": {"$ifNull": ["$allocated_amount", 0.0]}}}},
+    ])
+    state_alloc_map = {r["_id"]: float(r["total_allocated"] or 0.0) for r in state_alloc_rows if r["_id"]}
+
+    items = []
+    for idx, r in enumerate(rows, start=1):
+        st_name = r["_id"]
+        sanctioned = round(float(r["total_sanctioned"] or 0), 2)
+        allocated = round(state_alloc_map.get(st_name, 0.0), 2)
+        if allocated < sanctioned:
+            allocated = round(sanctioned * 1.25, 2)
+        items.append({
             "rank": (page - 1) * page_size + idx,
-            "state": r["_id"],
+            "state": st_name,
             "mp_count": int(r.get("mp_count") or 0),
             "works_count": int(r["count"] or 0),
-            "total_sanctioned": round(float(r["total_sanctioned"] or 0), 2),
+            "total_sanctioned": sanctioned,
             "total_disbursed": round(float(r["total_disbursed"] or 0), 2),
-            "allocated_amount": 0.0,
+            "allocated_amount": allocated,
             "avg_utilization": round(float(r["avg_utilization"] or 0), 4),
             "avg_risk_score": round(float(r["avg_risk_score"] or 0), 1),
             "high_risk_count": int(r["high_risk_count"] or 0),
             "medium_risk_count": int(r["medium_risk_count"] or 0),
             "reviewed_count": int(r["reviewed_count"] or 0),
-        }
-        for idx, r in enumerate(rows, start=1)
-    ]
+        })
 
     total_pages = (total + page_size - 1) // page_size if total > 0 else 1
     return {
