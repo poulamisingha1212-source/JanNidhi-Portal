@@ -193,6 +193,8 @@ def _normalize_work(row: pd.Series) -> dict:
         "weighted_rule_score": _f("weighted_rule_score"),
         "anomaly_percentile": _f("anomaly_percentile"),
         "is_anomaly": bool(row.get("is_anomaly", False)),
+        "agent_breakdown": _s("agent_breakdown"),
+        "agent_scores": row.get("agent_scores", {}),
     }
 
 
