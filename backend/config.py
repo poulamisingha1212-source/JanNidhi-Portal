@@ -39,8 +39,8 @@ class Settings:
     # MongoDB: the only persistence layer (Vercel serverless has no usable
     # local disk, so SQLite is gone). MPLADS_DB_NAME lets tests point at a
     # throwaway database on the same cluster.
-    MONGODB_URI: str = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-    MONGO_DB_NAME: str = os.getenv("MONGO_DB_NAME", "mplads_sentinel")
+    MONGODB_URI: str = os.getenv("MONGODB_URI", "mongodb://localhost:27017").strip()
+    MONGO_DB_NAME: str = os.getenv("MONGO_DB_NAME", "mplads_sentinel").strip().strip('"').strip("'")
 
     DATA_DIR: Path = BASE_DIR / "data"
     MODEL_DIR: Path = BASE_DIR / "model"
