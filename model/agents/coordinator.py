@@ -85,14 +85,8 @@ class AgentCoordinator:
         work['final_risk_score'] = (raw_priority.rank(pct=True, method='average') * 100).round(1)
         work['priority_rank'] = raw_priority.rank(ascending=False, method='min').astype(int)
 
-        # ---- portfolio-relative tiers ------------------------------------
-        if len(work) > 10:
-            high_threshold = work['likelihood_score'].quantile(0.90)
-            medium_threshold = work['likelihood_score'].quantile(0.70)
-        else:
-            high_threshold, medium_threshold = 0.45, 0.25
-        work['risk_tier'] = work['likelihood_score'].apply(
-            lambda s: self._tier(s, high_threshold, medium_threshold))
+        # ---- score-threshold tiers: under 50 Low Risk, up to 70 Medium Risk, > 70 High Risk ----
+        work['risk_tier'] = work['final_risk_score'].apply(self._tier_by_score)
 
         work['recommended_action'] = work['rule_flags_triggered'].apply(self._action)
         work['agent_breakdown'] = work.apply(self._breakdown_json, axis=1)
@@ -102,10 +96,10 @@ class AgentCoordinator:
 
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _tier(score, high, medium):
-        if score >= high:
+    def _tier_by_score(final_risk_score):
+        if final_risk_score > 70.0:
             return 'High Risk - Review'
-        if score >= medium:
+        if final_risk_score >= 50.0:
             return 'Medium Risk - Monitor'
         return 'Low Risk'
 
