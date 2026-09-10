@@ -23,7 +23,7 @@ from backend.schemas import (
     LoginRequest, LoginResponse, PublicReviewCreateRequest, PublicReviewResponse
 )
 from backend.auth import (
-    get_current_role, require_reviewer_role,
+    get_current_role, require_reviewer_role, verify_password, create_access_token,
     ROLE_MOSPI_REVIEWER, ROLE_DISTRICT_AUDITOR, ROLE_PUBLIC_TIER
 )
 from backend.seeder import seed_database
@@ -134,7 +134,7 @@ def get_works(
         flags = item["rule_flags_triggered"]
         causes = [RULE_DESCRIPTIONS.get(f, f"Flag triggered: {f}") for f in flags]
         if w.get("is_anomaly"):
-            causes.append("Statistical outlier detected by Isolation Forest.")
+            causes.append("Flagged as statistical anomaly by Multi-Agent Risk Engine.")
         item["causes"] = causes
         items.append(WorkListItem(**item))
 
@@ -548,13 +548,24 @@ def record_public_review(
 @app.post("/api/auth/login", response_model=LoginResponse)
 def login_user(payload: LoginRequest, db=Depends(get_db)):
     """
-    Authenticates District Auditor and MoSPI Reviewer users against MongoDB `users` collection.
+    Authenticates District Auditor and MoSPI Reviewer users against MongoDB `users` collection using PBKDF2 hash.
+    Generates a signed access token.
     """
     uname = payload.username.strip()
     pwd = payload.password.strip()
 
     user = users.find_one({"username": uname})
-    if not user or user.get("password") != pwd:
+    stored_password = user.get("password") if user else None
+
+    # Support PBKDF2 hashed password or fallback plain text check
+    is_valid = False
+    if stored_password:
+        if stored_password.startswith("0") or len(stored_password) == 64:
+            is_valid = verify_password(pwd, stored_password)
+        else:
+            is_valid = (stored_password == pwd)
+
+    if not user or not is_valid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Wrong username or password"
@@ -564,8 +575,11 @@ def login_user(payload: LoginRequest, db=Depends(get_db)):
     if assigned_role not in {ROLE_MOSPI_REVIEWER, ROLE_DISTRICT_AUDITOR}:
         assigned_role = ROLE_MOSPI_REVIEWER
 
+    token = create_access_token(user["username"], assigned_role)
+
     return LoginResponse(
         success=True,
+        token=token,
         username=user["username"],
         role=assigned_role,
         message="Authentication successful"

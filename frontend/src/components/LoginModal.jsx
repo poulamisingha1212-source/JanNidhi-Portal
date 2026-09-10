@@ -39,7 +39,7 @@ export default function LoginModal({ targetRole, onClose, onSuccess }) {
         return;
       }
 
-      onSuccess(data.username, data.role || targetRole);
+      onSuccess(data.username, data.role || targetRole, data.token);
     } catch (err) {
       console.error('Login error:', err);
       setErrorMsg('Server connection failed. Please check backend API.');

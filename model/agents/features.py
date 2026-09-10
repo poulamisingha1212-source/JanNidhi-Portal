@@ -26,7 +26,7 @@ CONFIG = {
     'duplicate_date_window_days': 90,
     'duplicate_cross_mp_window_days': 365,
     'over_allocation_tolerance': 1.05,
-    'reference_date': pd.Timestamp('2026-09-06'),
+    'reference_date': None,  # Dynamically set to current date in build_features() if None
 }
 
 TRUST_SOCIETY_CATEGORIES = ['Trust and Society', 'Bar and Associations']
@@ -133,6 +133,9 @@ def build_features(df: pd.DataFrame, mp_allocations: dict = None) -> pd.DataFram
     """
     work = df.copy()
 
+    # Dynamic reference date (current date or inject for testing)
+    ref_date = CONFIG.get('reference_date') or pd.Timestamp.now().normalize()
+
     # --- numeric backbone -------------------------------------------------
     for col in ['sanction_amount', 'amount_disbursed', 'total_fund_disbursed',
                 'fund_disbursed_amount', 'recommended_amount', 'allocated_amount']:
@@ -168,13 +171,13 @@ def build_features(df: pd.DataFrame, mp_allocations: dict = None) -> pd.DataFram
         else pd.Series(pd.NaT, index=work.index), errors='coerce')
 
     work['days_since_sanction'] = (
-        (CONFIG['reference_date'] - sanction_date).dt.days.clip(lower=0).fillna(0)
+        (ref_date - sanction_date).dt.days.clip(lower=0).fillna(0)
     )
     work['completion_speed_days'] = (
         (completion_date - sanction_date).dt.days.clip(lower=0).fillna(0)
     )
     work['days_since_last_expenditure'] = (
-        (CONFIG['reference_date'] - last_exp_date).dt.days.fillna(0)
+        (ref_date - last_exp_date).dt.days.fillna(0)
     )
     work['days_payment_after_completion'] = (
         (last_exp_date - completion_date).dt.days.fillna(0)

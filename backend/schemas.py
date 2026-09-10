@@ -255,6 +255,7 @@ class LoginRequest(BaseModel):
 
 class LoginResponse(BaseModel):
     success: bool
+    token: str
     username: str
     role: str
     message: str

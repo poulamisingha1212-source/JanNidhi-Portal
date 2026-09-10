@@ -34,7 +34,10 @@ export default function App() {
     }
   };
 
-  const handleLoginSuccess = (uname, role) => {
+  const handleLoginSuccess = (uname, role, token) => {
+    if (token) {
+      localStorage.setItem('jannidhi_auth_token', token);
+    }
     setCurrentRole(role);
     setLoggedInUser(uname);
     setPendingRole(null);
@@ -42,6 +45,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    localStorage.removeItem('jannidhi_auth_token');
     setCurrentRole('Read-Only Public Tier');
     setLoggedInUser('');
     toast.info('Logged out to Public Tier');

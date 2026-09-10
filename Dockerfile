@@ -11,7 +11,6 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PORT=7860 \
-    DATABASE_URL=sqlite:////app/mplads_sentinel.db \
     CORS_ORIGINS=*
 
 WORKDIR /app

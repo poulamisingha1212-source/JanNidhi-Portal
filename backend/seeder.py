@@ -100,20 +100,21 @@ def _seed_from_sample() -> int:
 def seed_users():
     """
     Ensure default administrative user exists in MongoDB `users` collection.
-    User: Netai / Password: 713502
+    User: Netai / Password: PBKDF2 hash of 713502
     """
+    from backend.auth import hash_password
     default_user = {
         "username": "Netai",
-        "password": "713502",
+        "password": hash_password("713502"),
         "role": "MoSPI Reviewer",
         "created_at": now_utc(),
     }
     users.update_one(
         {"username": "Netai"},
-        {"$setOnInsert": default_user},
+        {"$set": default_user},
         upsert=True
     )
-    print("User 'Netai' seeded into users collection.")
+    print("User 'Netai' seeded into users collection with secure PBKDF2 password hash.")
 
 
 def seed_database(force: bool = False):
