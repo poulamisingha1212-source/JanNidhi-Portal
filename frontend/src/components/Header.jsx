@@ -24,12 +24,22 @@ export default function Header({
   setActiveTab,
   currentRole,
   setCurrentRole,
+  onRoleSelect,
   syncStatus,
   onTriggerSync,
   isSyncing,
   house,
   setHouse,
+  loggedInUser,
+  onLogout,
 }) {
+  const handleRoleChange = (selectedRole) => {
+    if (onRoleSelect) {
+      onRoleSelect(selectedRole);
+    } else {
+      setCurrentRole(selectedRole);
+    }
+  };
   return (
     <TooltipProvider delayDuration={150}>
       <header className="glass-panel border-b sticky top-0 z-40 px-4 sm:px-6 py-2.5 transition-all bg-white/95 backdrop-blur-md">
@@ -139,7 +149,7 @@ export default function Header({
             </Tooltip>
 
             {/* RBAC Role Switcher */}
-            <Select value={currentRole} onValueChange={setCurrentRole}>
+            <Select value={currentRole} onValueChange={handleRoleChange}>
               <SelectTrigger className="h-9 min-w-[150px] px-3 gap-2 rounded-xl border-slate-200/90 bg-white text-xs font-medium shadow-2xs hover:bg-slate-50 transition-colors focus:ring-primary/20 cursor-pointer">
                 <UserCheck className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
                 <SelectValue />
@@ -150,6 +160,18 @@ export default function Header({
                 <SelectItem value="Read-Only Public Tier" className="text-xs cursor-pointer">Public Tier (Read-Only)</SelectItem>
               </SelectContent>
             </Select>
+
+            {/* User logout button if logged in */}
+            {loggedInUser && currentRole !== 'Read-Only Public Tier' && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onLogout}
+                className="h-9 px-2.5 rounded-xl text-xs font-medium text-slate-500 hover:text-slate-800 hover:bg-slate-100 cursor-pointer"
+              >
+                Logout ({loggedInUser})
+              </Button>
+            )}
           </div>
 
           {/* Mobile Secondary Controls Bar (< lg only) */}
@@ -167,7 +189,7 @@ export default function Header({
                 </SelectContent>
               </Select>
 
-              <Select value={currentRole} onValueChange={setCurrentRole}>
+              <Select value={currentRole} onValueChange={handleRoleChange}>
                 <SelectTrigger className="h-8 text-xs rounded-lg flex-1 border-slate-200/90 bg-white">
                   <UserCheck className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
                   <SelectValue />

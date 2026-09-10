@@ -23,6 +23,7 @@ works = db["works"]
 mp_allocations = db["mp_allocations"]
 review_logs = db["review_logs"]
 sync_logs = db["sync_logs"]
+users = db["users"]
 _counters = db["counters"]
 
 
@@ -57,6 +58,7 @@ def ensure_indexes() -> None:
     mp_allocations.create_index([("_mp_name_lower", ASCENDING)])
     review_logs.create_index([("work_id", ASCENDING), ("created_at", DESCENDING)])
     sync_logs.create_index([("run_timestamp", DESCENDING)])
+    users.create_index([("username", ASCENDING)], unique=True)
 
 
 def get_db():

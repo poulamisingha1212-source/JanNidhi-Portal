@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { toast } from 'sonner';
 import Header from './components/Header';
+import LoginModal from './components/LoginModal';
 import PriorityQueue from './components/PriorityQueue';
 import CasePacketModal from './components/CasePacketModal';
 import PortfolioOverview from './components/PortfolioOverview';
@@ -14,7 +15,37 @@ import { apiFetch } from '@/lib/api';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('overview'); // Default tab set to 'overview' (Dashboard)!
-  const [currentRole, setCurrentRole] = useState('MoSPI Reviewer');
+  const [currentRole, setCurrentRole] = useState('Read-Only Public Tier'); // Default role: Public Tier!
+  const [loggedInUser, setLoggedInUser] = useState('');
+
+  // Login modal state
+  const [pendingRole, setPendingRole] = useState(null);
+
+  const handleRoleSelect = (selectedRole) => {
+    if (selectedRole === 'Read-Only Public Tier') {
+      setCurrentRole('Read-Only Public Tier');
+      setLoggedInUser('');
+      toast.info('Switched to Read-Only Public Tier');
+    } else {
+      if (loggedInUser && currentRole === selectedRole) {
+        return;
+      }
+      setPendingRole(selectedRole);
+    }
+  };
+
+  const handleLoginSuccess = (uname, role) => {
+    setCurrentRole(role);
+    setLoggedInUser(uname);
+    setPendingRole(null);
+    toast.success(`Welcome ${uname}! Authenticated as ${role}`);
+  };
+
+  const handleLogout = () => {
+    setCurrentRole('Read-Only Public Tier');
+    setLoggedInUser('');
+    toast.info('Logged out to Public Tier');
+  };
 
   // Works state (Priority Queue)
   const [works, setWorks] = useState([]);
@@ -257,12 +288,24 @@ export default function App() {
         setActiveTab={setActiveTab}
         currentRole={currentRole}
         setCurrentRole={setCurrentRole}
+        onRoleSelect={handleRoleSelect}
         syncStatus={syncStatus}
         onTriggerSync={handleTriggerSync}
         isSyncing={isSyncing}
         house={house}
         setHouse={setHouse}
+        loggedInUser={loggedInUser}
+        onLogout={handleLogout}
       />
+
+      {/* Login Authentication Modal */}
+      {pendingRole && (
+        <LoginModal
+          targetRole={pendingRole}
+          onClose={() => setPendingRole(null)}
+          onSuccess={handleLoginSuccess}
+        />
+      )}
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">

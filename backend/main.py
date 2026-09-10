@@ -13,17 +13,18 @@ from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import PyMongoError
 
 from backend.config import settings
-from backend.database import get_db, works, review_logs, sync_logs, mp_allocations, ensure_indexes
+from backend.database import get_db, works, review_logs, sync_logs, mp_allocations, users, ensure_indexes
 from backend.schemas import (
     WorkListItem, WorkPaginationResponse, CasePacketResponse,
     ReviewCreateRequest, ReviewResponse, StatsOverviewResponse,
     EntityRiskStat, SyncLogResponse, MPDirectoryItem,
     EntityDirectoryResponse, MPProfileResponse, StateProfileResponse,
-    BreakdownStat, CategoryStat, StatusStat, HealthResponse
+    BreakdownStat, CategoryStat, StatusStat, HealthResponse,
+    LoginRequest, LoginResponse
 )
 from backend.auth import (
     get_current_role, require_reviewer_role,
-    ROLE_MOSPI_REVIEWER, ROLE_PUBLIC_TIER
+    ROLE_MOSPI_REVIEWER, ROLE_DISTRICT_AUDITOR, ROLE_PUBLIC_TIER
 )
 from backend.seeder import seed_database
 from backend.services.ingestion import run_ingestion, get_sync_status, VALID_MODES
@@ -478,6 +479,37 @@ def record_human_review(
         reviewer_role=reviewer_role,
         notes=payload.notes,
         created_at=now
+    )
+
+
+# ==============================================================================
+# 5b. POST /api/auth/login — MongoDB Authentication Endpoint
+# ==============================================================================
+@app.post("/auth/login", response_model=LoginResponse)
+@app.post("/api/auth/login", response_model=LoginResponse)
+def login_user(payload: LoginRequest, db=Depends(get_db)):
+    """
+    Authenticates District Auditor and MoSPI Reviewer users against MongoDB `users` collection.
+    """
+    uname = payload.username.strip()
+    pwd = payload.password.strip()
+
+    user = users.find_one({"username": uname})
+    if not user or user.get("password") != pwd:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Wrong username or password"
+        )
+
+    assigned_role = payload.target_role or user.get("role") or ROLE_MOSPI_REVIEWER
+    if assigned_role not in {ROLE_MOSPI_REVIEWER, ROLE_DISTRICT_AUDITOR}:
+        assigned_role = ROLE_MOSPI_REVIEWER
+
+    return LoginResponse(
+        success=True,
+        username=user["username"],
+        role=assigned_role,
+        message="Authentication successful"
     )
 
 

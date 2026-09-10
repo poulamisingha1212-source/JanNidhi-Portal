@@ -229,6 +229,19 @@ class HealthResponse(BaseModel):
     timestamp: str
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    target_role: Optional[str] = "MoSPI Reviewer"
+
+
+class LoginResponse(BaseModel):
+    success: bool
+    username: str
+    role: str
+    message: str
+
+
 class SyncLogResponse(BaseModel):
     id: int
     run_timestamp: datetime
