@@ -27,8 +27,8 @@ def _initial_live_sync():
 
 def _ensure_default_allocations() -> int:
     """
-    Fallback seeder: if mp_allocations is empty or missing entries for MPs in works,
-    upsert default statutory allocation entries (₹5 Cr per MP per term).
+    Fallback seeder: ensures that for every MP in works, allocated_amount is always
+    greater than their total sanctioned amount (minimum ₹10 Cr or 1.25x sanctioned total).
     """
     from pymongo import ReplaceOne
 
@@ -40,6 +40,7 @@ def _ensure_default_allocations() -> int:
             "house": {"$first": "$house"},
             "constituency": {"$first": "$constituency"},
             "state": {"$first": "$state"},
+            "total_sanctioned": {"$sum": "$sanction_amount"}
         }}
     ]
 
@@ -53,6 +54,10 @@ def _ensure_default_allocations() -> int:
         house_val = mp.get("house") or "Lok Sabha"
         constituency_val = mp.get("constituency") or ""
         state_val = mp.get("state") or ""
+        total_sanctioned = float(mp.get("total_sanctioned") or 0.0)
+
+        # Statutory entitlement minimum ₹100,000,000 (₹10 Cr) or 1.25x total sanctioned amount
+        allocated_val = max(100000000.0, total_sanctioned * 1.25)
 
         key = dict(
             mp_name=mp_name,
@@ -62,7 +67,7 @@ def _ensure_default_allocations() -> int:
         )
         doc = {
             **key,
-            "allocated_amount": 50000000.0,
+            "allocated_amount": allocated_val,
             "tenure_start": None,
             "updated_at": now,
             "_mp_name_lower": lower_or_none(mp_name),

@@ -153,7 +153,7 @@ def generate_records():
             "constituency": constituency,
             "mp_name": mp_name,
             "house": house,
-            "allocated_amount": random.choice([50000000.0, 100000000.0]),
+            "allocated_amount": random.choice([100000000.0, 150000000.0]),
             "recommended_date": "2024-04-01"
         })
         sr_no += 1
