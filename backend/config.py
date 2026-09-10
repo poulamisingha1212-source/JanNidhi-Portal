@@ -77,7 +77,7 @@ class Settings:
     # lok_sabha_18 | both. rajya_sabha keeps scheduled syncs fast; "both"
     # pulls the ~90 MB Lok Sabha payloads.
     MPLADS_BASE_URL: str = os.getenv("MPLADS_BASE_URL", "https://mplads.mospi.gov.in")
-    MPLADS_LIVE_HOUSE: str = os.getenv("MPLADS_LIVE_HOUSE", "rajya_sabha")
+    MPLADS_LIVE_HOUSE: str = os.getenv("MPLADS_LIVE_HOUSE", "both")
     MPLADS_LIVE_TIMEOUT: int = int(os.getenv("MPLADS_LIVE_TIMEOUT", "300"))
 
 settings = Settings()
