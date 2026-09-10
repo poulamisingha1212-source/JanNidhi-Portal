@@ -31,16 +31,26 @@ def _cors_origins() -> list[str]:
         ]
     return [origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()]
 
+
+def _clean_db_name(val: str | None) -> str:
+    if not val:
+        return "mplads_sentinel"
+    # Strip spaces, single/double quotes, and trailing/leading invalid chars
+    cleaned = val.strip().strip('"').strip("'").replace(" ", "")
+    # Remove any character not allowed in Mongo database names: /\. "$*<>:|?
+    for char in ['/', '\\', '.', ' ', '"', '$', '*', '<', '>', ':', '|', '?']:
+        cleaned = cleaned.replace(char, '')
+    return cleaned if cleaned else "mplads_sentinel"
+
+
 class Settings:
     PROJECT_NAME: str = "MPLADS AI Sentinel"
     VERSION: str = "1.0.0"
     API_V1_STR: str = "/api"
 
-    # MongoDB: the only persistence layer (Vercel serverless has no usable
-    # local disk, so SQLite is gone). MPLADS_DB_NAME lets tests point at a
-    # throwaway database on the same cluster.
-    MONGODB_URI: str = os.getenv("MONGODB_URI", "mongodb://localhost:27017").strip()
-    MONGO_DB_NAME: str = os.getenv("MONGO_DB_NAME", "mplads_sentinel").strip().strip('"').strip("'")
+    # MongoDB: the only persistence layer
+    MONGODB_URI: str = os.getenv("MONGODB_URI", "mongodb://localhost:27017").strip().strip('"').strip("'")
+    MONGO_DB_NAME: str = _clean_db_name(os.getenv("MONGO_DB_NAME"))
 
     DATA_DIR: Path = BASE_DIR / "data"
     MODEL_DIR: Path = BASE_DIR / "model"
@@ -67,7 +77,7 @@ class Settings:
     # lok_sabha_18 | both. rajya_sabha keeps scheduled syncs fast; "both"
     # pulls the ~90 MB Lok Sabha payloads.
     MPLADS_BASE_URL: str = os.getenv("MPLADS_BASE_URL", "https://mplads.mospi.gov.in")
-    MPLADS_LIVE_HOUSE: str = os.getenv("MPLADS_LIVE_HOUSE", "rajya_sabha")
+    MPLADS_LIVE_HOUSE: str = os.getenv("MPLADS_LIVE_HOUSE", "both")
     MPLADS_LIVE_TIMEOUT: int = int(os.getenv("MPLADS_LIVE_TIMEOUT", "300"))
 
 settings = Settings()
