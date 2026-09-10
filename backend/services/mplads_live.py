@@ -334,6 +334,7 @@ class MPLADSLiveClient:
         """Fetch all four datasets for the selected houses and return the
         long-format DataFrame ready for the ingestion pipeline. Rows are
         tagged with the house they were fetched from."""
+        import gc
         combos = resolve_house_selection(houses)
         frames: List[pd.DataFrame] = []
 
@@ -343,12 +344,16 @@ class MPLADSLiveClient:
                 collected[dataset].extend(self.fetch_dataset(combo_key, dataset))
                 time.sleep(self.inter_request_delay)
             df = datasets_to_long_frame(collected, house=HOUSE_LABELS[combo_key])
+            del collected
+            gc.collect()
             if not df.empty:
                 frames.append(df)
 
         if not frames:
             raise ValueError("Live dashboard API returned no usable records")
         df = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
+        del frames
+        gc.collect()
         return df
 
 
