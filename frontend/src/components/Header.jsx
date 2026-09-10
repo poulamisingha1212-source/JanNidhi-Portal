@@ -1,6 +1,6 @@
 import React from 'react';
 import {
-  UserCheck, Landmark, RefreshCw,
+  UserCheck, Landmark, RefreshCw, Heart, ExternalLink,
   LayoutDashboard, ListChecks, Users, MapPin, Scale,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -55,7 +55,7 @@ export default function Header({
               />
             </div>
 
-            {/* Compact Mobile Quick-Status (< lg only) */}
+            {/* Compact Mobile Quick-Status & Action (< lg only) */}
             <div className="flex lg:hidden items-center gap-2 shrink-0">
               <div
                 className={`h-7 px-2 rounded-lg border text-[11px] font-medium inline-flex items-center gap-1.5 ${
@@ -67,6 +67,17 @@ export default function Header({
                 <span className={`w-1.5 h-1.5 rounded-full ${syncStatus?.is_data_stale ? 'bg-amber-500' : 'bg-emerald-500 animate-pulse'}`} />
                 <span>{syncStatus?.is_data_stale ? 'Stale' : 'Live'}</span>
               </div>
+
+              <a
+                href="https://mplads.mospi.gov.in/digigov/dashboard.html"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 h-7 px-2.5 rounded-lg bg-gradient-to-r from-rose-500 via-pink-500 to-indigo-600 hover:from-rose-600 hover:to-indigo-700 text-white text-[11px] font-semibold shadow-xs transition-all active:scale-95 cursor-pointer whitespace-nowrap"
+              >
+                <Heart className="w-3 h-3 fill-white/30 shrink-0" />
+                <span>Contribute</span>
+                <ExternalLink className="w-2.5 h-2.5 opacity-80 shrink-0" />
+              </a>
             </div>
           </div>
 
@@ -145,6 +156,25 @@ export default function Header({
               </TooltipTrigger>
               <TooltipContent className="text-xs rounded-lg shadow-md">
                 {syncStatus?.staleness_message || 'Data verified with MoSPI live portal records'}
+              </TooltipContent>
+            </Tooltip>
+
+            {/* Contribute to Society Action Button */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <a
+                  href="https://mplads.mospi.gov.in/digigov/dashboard.html"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 h-9 px-3 rounded-xl bg-gradient-to-r from-rose-500 via-pink-500 to-indigo-600 hover:from-rose-600 hover:via-pink-600 hover:to-indigo-700 text-white text-xs font-semibold shadow-xs shadow-rose-500/20 hover:shadow-md hover:shadow-rose-500/25 transition-all duration-200 active:scale-95 cursor-pointer shrink-0"
+                >
+                  <Heart className="w-3.5 h-3.5 fill-white/30 text-white shrink-0" />
+                  <span>Contribute to Society</span>
+                  <ExternalLink className="w-3 h-3 opacity-80 shrink-0" />
+                </a>
+              </TooltipTrigger>
+              <TooltipContent className="text-xs rounded-lg shadow-md">
+                Visit MoSPI Portal Dashboard
               </TooltipContent>
             </Tooltip>
 
