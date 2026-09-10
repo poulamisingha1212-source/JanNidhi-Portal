@@ -13,7 +13,7 @@ import { DotPattern } from '@/components/magicui/dot-pattern';
 import { apiFetch } from '@/lib/api';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('queue'); // 'queue' is the mandatory default view!
+  const [activeTab, setActiveTab] = useState('overview'); // Default tab set to 'overview' (Dashboard)!
   const [currentRole, setCurrentRole] = useState('MoSPI Reviewer');
 
   // Works state (Priority Queue)
