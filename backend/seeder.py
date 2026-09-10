@@ -40,22 +40,23 @@ def _seed_from_sample() -> int:
 
 def seed_database(force: bool = False):
     """
-    Ensure indexes exist and, when the works collection is empty, populate it —
-    synchronously from the bundled sample on serverless, otherwise via a
-    background live sync. Safe to run repeatedly; idempotent.
+    Ensure indexes exist and populate/update the works collection —
+    synchronously from the bundled sample feed on startup so all features and
+    charts render full data. Safe to run repeatedly; idempotent.
     """
     ensure_indexes()
 
     existing_count = works.count_documents({})
-    if existing_count and existing_count > 0 and not force:
+    # If the collection already has >= 1000 records and force is False, keep existing data.
+    if existing_count >= 1000 and not force:
         print(f"Database already contains {existing_count} records. Bootstrap skipped.")
         return existing_count
 
-    if settings.SEED_FROM_SAMPLE:
-        print("Database empty — seeding from the bundled sample feed...")
+    if settings.SEED_FROM_SAMPLE or existing_count < 1000 or force:
+        print(f"Seeding database with the rich sample feed (current count: {existing_count})...")
         return _seed_from_sample()
 
-    print("Database empty — starting initial live sync in the background...")
+    print("Starting initial live sync in the background...")
     threading.Thread(target=_initial_live_sync, daemon=True).start()
     return 0
 
