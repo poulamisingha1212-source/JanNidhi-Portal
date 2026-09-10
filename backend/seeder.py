@@ -28,7 +28,7 @@ def _initial_live_sync():
 def _ensure_default_allocations() -> int:
     """
     Fallback seeder: if mp_allocations is empty or missing entries for MPs in works,
-    upsert default statutory allocation entries (₹5 Cr per MP per term).
+    upsert default statutory allocation entries (₹12 Cr per MP per term).
     """
     from pymongo import ReplaceOne
 
@@ -62,7 +62,7 @@ def _ensure_default_allocations() -> int:
         )
         doc = {
             **key,
-            "allocated_amount": 50000000.0,
+            "allocated_amount": 120000000.0,
             "tenure_start": None,
             "updated_at": now,
             "_mp_name_lower": lower_or_none(mp_name),
