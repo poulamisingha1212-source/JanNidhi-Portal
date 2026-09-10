@@ -186,7 +186,7 @@ Key configuration parameters:
 - `DATABASE_URL`: PostgreSQL connection string.
 - `API_PREFIX`: `/api`
 - `CORS_ORIGINS`: Allowed web client origins.
-- Nightly sync is automatic at **03:00 IST** (APScheduler cron); no configuration needed.
+- Nightly sync is automatic at **01:00 IST** (APScheduler cron); no configuration needed.
 
 ---
 
@@ -233,14 +233,14 @@ Sync is **mode-based**. Trigger via HTTP (requires `MoSPI Reviewer` role):
 curl -X POST "http://localhost:8000/api/sync/run?mode=live" -H "X-User-Role: MoSPI Reviewer"
 ```
 
-The nightly run happens automatically at **03:00 IST**. Every run writes exactly one
+The nightly run happens automatically at **01:00 IST**. Every run writes exactly one
 `sync_logs` entry (LIVE API badge) and the failure reason is preserved in the log.
 
 ---
 
 ## 10. How Scheduled Ingestion Works
 
-1. **Scheduler:** An `APScheduler` cron job runs a **live sync automatically at 03:00 IST**
+1. **Scheduler:** An `APScheduler` cron job runs a **live sync automatically at 01:00 IST**
    every night. Manual triggers are available via `POST /api/sync/run?mode=live`, which
    starts the run in the background and returns immediately.
 2. **Single source — the live portal:**
