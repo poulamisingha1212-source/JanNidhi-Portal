@@ -7,9 +7,6 @@ import { Button } from '@/components/ui/button';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
-import {
-  Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
-} from '@/components/ui/tooltip';
 
 const NAV_TABS = [
   { id: 'overview', label: 'Dashboard', icon: LayoutDashboard },
@@ -41,8 +38,7 @@ export default function Header({
     }
   };
   return (
-    <TooltipProvider delayDuration={150}>
-      <header className="glass-panel border-b sticky top-0 z-40 px-4 sm:px-6 py-2.5 transition-all bg-white/95 backdrop-blur-md">
+    <header className="glass-panel border-b sticky top-0 z-40 px-4 sm:px-6 py-2.5 transition-all bg-white/95 backdrop-blur-md">
         <div className="max-w-7xl mx-auto flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 lg:gap-4">
           
           {/* Left Section: Brand Logo */}
@@ -53,20 +49,6 @@ export default function Header({
                 alt="JanNidhi brand logo"
                 className="h-9 sm:h-10 w-auto object-contain"
               />
-            </div>
-
-            {/* Compact Mobile Quick-Status (< lg only) */}
-            <div className="flex lg:hidden items-center gap-2 shrink-0">
-              <div
-                className={`h-7 px-2 rounded-lg border text-[11px] font-medium inline-flex items-center gap-1.5 ${
-                  syncStatus?.is_data_stale
-                    ? 'border-amber-200 bg-amber-50 text-amber-800'
-                    : 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                }`}
-              >
-                <span className={`w-1.5 h-1.5 rounded-full ${syncStatus?.is_data_stale ? 'bg-amber-500' : 'bg-emerald-500 animate-pulse'}`} />
-                <span>{syncStatus?.is_data_stale ? 'Stale' : 'Live'}</span>
-              </div>
             </div>
           </div>
 
@@ -122,31 +104,6 @@ export default function Header({
               </Button>
             )}
 
-            {/* Live Data Freshness Capsule */}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div
-                  className={`h-9 px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-2 cursor-default select-none shadow-2xs whitespace-nowrap transition-colors ${
-                    syncStatus?.is_data_stale
-                      ? 'border-amber-200 bg-amber-50/90 text-amber-800'
-                      : 'border-emerald-200/90 bg-emerald-50/90 text-emerald-800'
-                  }`}
-                >
-                  <span className="relative flex h-2 w-2">
-                    <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
-                      syncStatus?.is_data_stale ? 'bg-amber-400' : 'bg-emerald-400'
-                    }`} />
-                    <span className={`relative inline-flex rounded-full h-2 w-2 ${
-                      syncStatus?.is_data_stale ? 'bg-amber-500' : 'bg-emerald-500'
-                    }`} />
-                  </span>
-                  <span>{syncStatus?.is_data_stale ? 'Data Stale' : 'Data Fresh'}</span>
-                </div>
-              </TooltipTrigger>
-              <TooltipContent className="text-xs rounded-lg shadow-md">
-                {syncStatus?.staleness_message || 'Data verified with MoSPI live portal records'}
-              </TooltipContent>
-            </Tooltip>
 
             {/* RBAC Role Switcher */}
             <Select value={currentRole} onValueChange={handleRoleChange}>
@@ -218,6 +175,5 @@ export default function Header({
 
         </div>
       </header>
-    </TooltipProvider>
   );
 }
