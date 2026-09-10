@@ -247,7 +247,7 @@ def get_mp_directory(
 
 def get_mp_profile(db, mp_name: str, house: Optional[str] = None) -> Optional[dict]:
     """Full transparency dossier for one MP: funds, risk tiers, breakdowns, works."""
-    match: dict = {"mp_name_lower": mp_name.strip().lower()}
+    match: dict = {"_mp_name_lower": mp_name.strip().lower()}
     if house:
         match["house"] = house.strip()
 
@@ -261,7 +261,7 @@ def get_mp_profile(db, mp_name: str, house: Optional[str] = None) -> Optional[di
 
     # The portal's allocated limit is an MP-level ledger value. It must never
     # fall back to the sum of work sanctions, which is a different source field.
-    alloc_match = {"mp_name_lower": mp_name.strip().lower()}
+    alloc_match = {"_mp_name_lower": mp_name.strip().lower()}
     if house:
         alloc_match["house"] = house.strip()
     alloc_rows = list(mp_allocations.aggregate([
@@ -413,7 +413,7 @@ def get_state_directory(
 
 def get_state_profile(db, state: str) -> Optional[dict]:
     """State dossier: funds, tier spread, top MPs, agencies and categories."""
-    match: dict = {"state_lower": state.strip().lower()}
+    match: dict = {"_state_lower": state.strip().lower()}
 
     agg_rows = list(works.aggregate([
         {"$match": match},
