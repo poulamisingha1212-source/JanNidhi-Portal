@@ -120,6 +120,9 @@ def seed_database(force: bool = False):
     ensure_indexes()
     seed_users()
 
+    # Ensure all existing mp_allocations records carry 12 Cr (120,000,000.0)
+    mp_allocations.update_many({}, {"$set": {"allocated_amount": 120000000.0}})
+
     existing_count = works.count_documents({})
     alloc_count = mp_allocations.count_documents({})
 
