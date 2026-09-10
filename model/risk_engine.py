@@ -81,6 +81,11 @@ RENAME_MAP = {
 # Scoring pipeline
 # ==============================================================================
 
+def load_models(model_dir=None):
+    """Legacy stub kept for backward compatibility."""
+    return {}
+
+
 def score_dataset(df, model_dir=None, mp_allocations=None):
     """Score work-level records through the multi-agent risk system.
 
