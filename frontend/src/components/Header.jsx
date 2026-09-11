@@ -2,6 +2,7 @@ import React from 'react';
 import {
   UserCheck, Landmark, RefreshCw,
   LayoutDashboard, ListChecks, Users, MapPin, Scale,
+  Heart, ExternalLink,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -122,31 +123,17 @@ export default function Header({
               </Button>
             )}
 
-            {/* Live Data Freshness Capsule */}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div
-                  className={`h-9 px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-2 cursor-default select-none shadow-2xs whitespace-nowrap transition-colors ${
-                    syncStatus?.is_data_stale
-                      ? 'border-amber-200 bg-amber-50/90 text-amber-800'
-                      : 'border-emerald-200/90 bg-emerald-50/90 text-emerald-800'
-                  }`}
-                >
-                  <span className="relative flex h-2 w-2">
-                    <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
-                      syncStatus?.is_data_stale ? 'bg-amber-400' : 'bg-emerald-400'
-                    }`} />
-                    <span className={`relative inline-flex rounded-full h-2 w-2 ${
-                      syncStatus?.is_data_stale ? 'bg-amber-500' : 'bg-emerald-500'
-                    }`} />
-                  </span>
-                  <span>{syncStatus?.is_data_stale ? 'Data Stale' : 'Data Fresh'}</span>
-                </div>
-              </TooltipTrigger>
-              <TooltipContent className="text-xs rounded-lg shadow-md">
-                {syncStatus?.staleness_message || 'Data verified with MoSPI live portal records'}
-              </TooltipContent>
-            </Tooltip>
+            {/* Contribute to Society Button */}
+            <a
+              href="https://frontend-steel-psi-55.vercel.app/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="h-9 px-3.5 rounded-xl bg-gradient-to-r from-rose-500 via-pink-500 to-indigo-600 hover:from-rose-600 hover:via-pink-600 hover:to-indigo-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 shadow-sm hover:shadow-md hover:scale-[1.02] active:scale-[0.98] transition-all duration-200 cursor-pointer border border-white/20 select-none group whitespace-nowrap"
+            >
+              <Heart className="w-3.5 h-3.5 text-rose-100 fill-rose-100/30 group-hover:scale-110 transition-transform" />
+              <span>Contribute to Society</span>
+              <ExternalLink className="w-3 h-3 text-white/80 group-hover:translate-x-0.5 transition-transform" />
+            </a>
 
             {/* RBAC Role Switcher */}
             <Select value={currentRole} onValueChange={handleRoleChange}>
